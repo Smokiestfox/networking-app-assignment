@@ -1,0 +1,121 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Collab Demo</title>
+<style>
+body{font-family:Arial;margin:0;background:#f6f8fb;color:#142033}
+main{max-width:1050px;margin:36px auto;padding:0 18px}
+h1{margin-bottom:4px}
+small{color:#64748b}
+.grid{display:grid;grid-template-columns:260px 1fr;gap:18px;margin-top:24px}
+.panel{background:white;border:1px solid #dce3eb;border-radius:14px;padding:18px}
+.user{padding:8px 10px;border-bottom:1px solid #eef2f7}
+.msg{padding:10px 0;border-bottom:1px solid #eef2f7}
+.row{display:flex;gap:8px;margin-top:12px}
+input,select,button{font:inherit;padding:10px;border:1px solid #cbd5e1;border-radius:8px}
+input[type=text]{flex:1}
+button{background:#075985;color:white;border:0;cursor:pointer}
+progress{width:100%}
+</style>
+</head>
+<body>
+<main>
+<h1>Distributed Collaboration Demo</h1>
+<small id="me"></small>
+
+<div class="grid">
+<section class="panel">
+<h3>Active users</h3>
+<div id="users"></div>
+</section>
+
+<section class="panel">
+<h3>Messages</h3>
+<div id="messages"></div>
+<div class="row">
+<select id="target"><option value="*">Everyone</option></select>
+<input id="text" type="text" placeholder="Message">
+<button onclick="sendMessage()">Send</button>
+</div>
+
+<h3>File transfer</h3>
+<div class="row">
+<input id="file" type="file">
+<button onclick="sendFile()">Send file</button>
+</div>
+<div id="transfers"></div>
+</section>
+</div>
+</main>
+
+<script>
+async function api(path, options){
+  const r = await fetch(path, options);
+  return r.json();
+}
+
+async function refresh(){
+  const s = await api('/api/state');
+  document.getElementById('me').textContent = 'Logged in as ' + s.username;
+
+  document.getElementById('users').innerHTML =
+    s.users.map(x => `<div class="user">${x}</div>`).join('');
+
+  const target = document.getElementById('target');
+  const current = target.value;
+  target.innerHTML = '<option value="*">Everyone</option>' +
+    s.users.filter(x => x !== s.username)
+      .map(x => `<option value="${x}">${x}</option>`).join('');
+  if ([...target.options].some(o => o.value === current)) target.value = current;
+
+  document.getElementById('messages').innerHTML =
+    s.messages.map(m =>
+      `<div class="msg"><b>${m.from}</b> → ${m.to}<br>${escapeHtml(m.text)} <small>${m.time}</small></div>`
+    ).join('');
+
+  document.getElementById('transfers').innerHTML =
+    s.transfers.map(t =>
+      `<div class="msg"><b>${t.direction}</b> ${escapeHtml(t.name)} with ${t.peer}
+      <progress value="${t.progress}" max="100"></progress>
+      <small>${t.status}</small></div>`
+    ).join('');
+}
+
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[c]));
+}
+
+async function sendMessage(){
+  const text = document.getElementById('text');
+  if (!text.value.trim()) return;
+  await api('/api/send',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({to:target.value,text:text.value})
+  });
+  text.value='';
+  refresh();
+}
+
+async function sendFile(){
+  const input = document.getElementById('file');
+  if (!input.files.length) return;
+  const f = input.files[0];
+  const bytes = new Uint8Array(await f.arrayBuffer());
+  let binary='';
+  for(let i=0;i<bytes.length;i++) binary += String.fromCharCode(bytes[i]);
+  await api('/api/file',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({to:target.value,name:f.name,data:btoa(binary)})
+  });
+}
+
+setInterval(refresh,700);
+refresh();
+</script>
+</body>
+</html>
