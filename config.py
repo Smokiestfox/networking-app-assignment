@@ -1,0 +1,5 @@
+
+HOST = "127.0.0.1"
+PORT = 9000
+
+FERNET_KEY = "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY="
