@@ -41,13 +41,13 @@ Chạy các bài protocol tests bằng `pytest`:
 python -m pytest tests/test_protocol.py
 ```
 
-### 2. Test Client–Server Communication
+### 2. Run Server Tests
 
 ```bash
 python -m pytest tests/test_server.py
 ```
 
-### 3. Kiểm thử giao tiếp Client–Server
+### 3. Test Client–Server Communication
 
 **Terminal 1 — Khởi chạy Server**
 
