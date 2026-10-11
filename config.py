@@ -1,5 +1,3 @@
-# config.py – Cấu hình chung cho client và server
-
 SERVER_HOST = "0.0.0.0"
 TCP_PORT = 9000
 UDP_PORT = 9001
@@ -10,7 +8,3 @@ MAX_RETRIES = 6
 WINDOW_SIZE = 8
 CHUNK_SIZE = 700
 FERNET_KEY = "6RY640KiPcYFTE3eFad1QPKzoR-BiAT2DB9MYKi1RO8="
-
-# Aliases hỗ trợ tương thích ngược
-HOST = SERVER_HOST
-PORT = TCP_PORT

@@ -89,3 +89,37 @@ sequenceDiagram
     Server->>ClientB: FILE_CHUNK
     ClientB-->>Server: ACK
 ```
+# Protocol Specification & Connection States
+
+This section defines the core application message types, protocol vocabulary, and connection state transitions for the client-server architecture.
+
+## 1. Message Types & Protocol Vocabulary
+
+To ensure clear communication between clients and the server, all application messages are categorized into a standardized protocol vocabulary.
+
+### Message Types Table
+
+| Value / Code | Name | Direction | Transport | Description |
+| :---: | --- | :---: | :---: | --- |
+| - | `HELLO` | Client $\leftrightarrow$ Server | TCP / UDP | Initial handshake signal to establish connection readiness. |
+| 5 | `ACK` | Client $\leftrightarrow$ Server | UDP | Acknowledgment packet carrying confirmation of received segments. |
+| - | `AUTH` | Client $\rightarrow$ Server | TCP / UDP | Authentication payload carrying username and credentials for registration. |
+| 2 | `MSG` | Client $\leftrightarrow$ Server | UDP / TCP | Real-time chat message payload (broadcast or unicast). |
+| 1 | `HEARTBEAT` | Client $\rightarrow$ Server | UDP | Periodic liveness signal to maintain active session presence. |
+| 3 | `FILE_META` | Client $\leftrightarrow$ Server | TCP / UDP | File transfer metadata including filename, size, and total chunks. |
+| 4 | `FILE_CHUNK` | Client $\leftrightarrow$ Server | UDP | Raw binary segment / chunk of an active file transfer. |
+| - | `BYE` | Client $\leftrightarrow$ Server | TCP / UDP | Graceful disconnection notice indicating session teardown. |
+
+## 2. Connection State Diagram
+
+The connection lifecycle transitions through distinct states managed by event triggers on both the client and server sides.
+
+```mermaid
+stateDiagram-v2
+    [*] --> CLOSED
+    CLOSED --> CONNECTING : Initiate connection / Socket open
+    CONNECTING --> ESTABLISHED : Receive HELLO / Auth success
+    ESTABLISHED --> CLOSING : Receive BYE / Disconnect request
+    ESTABLISHED --> CLOSING : Connection timeout / Network error
+    CLOSING --> CLOSED : Cleanup resources & close socket
+    ESTABLISHED --> CONNECTING : Reconnect / Session retry
