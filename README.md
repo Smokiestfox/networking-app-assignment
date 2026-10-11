@@ -30,3 +30,37 @@ Môn: Network Application Development, Assignment 1.
     ├── architecture.md  # kiến trúc hệ thống
     └── protocol.md      # đặc tả giao thức
 ```
+
+## Demo và 
+
+### 1. Run Protocol Tests
+
+Chạy các bài protocol tests bằng `pytest`:
+
+```bash
+python -m pytest tests/test_protocol.py
+```
+
+### 2. Test Client–Server Communication
+
+```bash
+python -m pytest tests/test_server.py
+```
+
+### 3. Kiểm thử giao tiếp Client–Server
+
+**Terminal 1 — Khởi chạy Server**
+
+```bash
+python server.py
+```
+
+**Terminal 2 — Khởi chạy Client**
+
+```bash
+python client.py "any_name"
+```
+
+Thay `"any_name"` bằng tên client mong muốn.
+
+Nếu kết nối và handshake thành công, client sẽ gửi `HELLO`, nhận phản hồi `ACK` từ server, sau đó gửi thông điệp `BYE` để kết thúc phiên giao tiếp.
