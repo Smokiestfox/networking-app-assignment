@@ -173,8 +173,16 @@ class CollaborationServer:
 
                 msg_type = str(data.get("type", "")).upper()
 
-                # 1. Xử lý Đăng nhập (AUTH / LOGIN): authenticate() -> register() atomic -> AUTH_OK / AUTH_FAIL
-                if msg_type in ("AUTH", "LOGIN"):
+                # 1. Giữ nguyên tương thích với lệnh HELLO (W1 Handshake)
+                if msg_type == "HELLO":
+                    response = {"type": "ACK", "status": "OK"}
+                    send_json_frame(conn, response)
+                    text = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Sent ACK to {client_id}: {response}"
+                    print(text, flush=True)
+                    self.log_file_write(text)
+
+                # 2. Xử lý Đăng nhập (AUTH / LOGIN): authenticate() -> register() atomic -> AUTH_OK / AUTH_FAIL
+                elif msg_type in ("AUTH", "LOGIN"):
                     username = data.get("username") or data.get("client") or data.get("user")
                     password = data.get("password") or data.get("pass")
 
@@ -215,7 +223,7 @@ class CollaborationServer:
                         print(text, flush=True)
                         self.log_file_write(text)
 
-                # 2. Lệnh Đăng xuất / Ngắt phiên (BYE / LOGOUT): Client chủ động ngắt
+                # 3. Lệnh Đăng xuất / Ngắt phiên (BYE / LOGOUT): Client chủ động ngắt
                 elif msg_type in ("BYE", "LOGOUT"):
                     response = {"type": "ACK", "status": "BYE"}
                     try:
@@ -227,7 +235,7 @@ class CollaborationServer:
                     self.log_file_write(text)
                     break
 
-                # 3. Yêu cầu lấy danh sách user
+                # 4. Yêu cầu lấy danh sách user
                 elif msg_type in ("USER_LIST", "GET_USERS"):
                     response = {
                         "type": "USER_LIST",
@@ -236,7 +244,7 @@ class CollaborationServer:
                     }
                     send_json_frame(conn, response)
 
-                # 4. PING kiểm tra liveness
+                # 5. PING kiểm tra liveness
                 elif msg_type == "PING":
                     send_json_frame(conn, {"type": "PONG"})
 

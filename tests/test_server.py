@@ -11,6 +11,37 @@ from protocol import send_json_frame, recv_json_frame
 from server import CollaborationServer
 
 
+def test_hello_ack():
+    """Test 0: Client gửi HELLO (W1 Handshake) -> Server phản hồi ACK OK."""
+    test_port = 9100
+    server = CollaborationServer(host="127.0.0.1", port=test_port)
+    server_thread = threading.Thread(target=server.run, daemon=True)
+    server_thread.start()
+    time.sleep(0.1)
+
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect(("127.0.0.1", test_port))
+
+        send_json_frame(sock, {"type": "HELLO", "client": "Alice"})
+        response = recv_json_frame(sock)
+
+        assert response is not None
+        assert response.get("type") == "ACK"
+        assert response.get("status") == "OK"
+
+        send_json_frame(sock, {"type": "BYE"})
+        bye_resp = recv_json_frame(sock)
+        assert bye_resp.get("type") == "ACK"
+        sock.close()
+    finally:
+        try:
+            server.sock.close()
+        except OSError:
+            pass
+        server_thread.join(timeout=1.0)
+
+
 def test_login_success():
     """Test 1: Client gửi LOGIN -> Server phản hồi AUTH_OK kèm danh sách user."""
     test_port = 9101
@@ -280,6 +311,12 @@ def test_logout_msg_type():
 
 
 if __name__ == "__main__":
+    print("========================================")
+    print("TEST 0: HELLO / ACK Handshake (W1)")
+    print("========================================")
+    test_hello_ack()
+    print("-> PASS: Client sent HELLO, Server replied ACK\n")
+
     print("========================================")
     print("TEST 1: Login Success (AUTH -> AUTH_OK)")
     print("========================================")

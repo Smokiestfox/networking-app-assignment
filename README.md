@@ -31,53 +31,36 @@ Môn: Network Application Development, Assignment 1.
     └── protocol.md      # đặc tả giao thức
 ```
 
-## Cách chạy và Kiểm thử
+## Demo và 
 
-### 1. Chạy Unit Tests
+### 1. Run Protocol Tests
 
-Chạy toàn bộ test suite bằng `pytest`:
-
-```bash
-python -m pytest tests/ -v
-```
-
-Hoặc chạy riêng từng bài test:
+Chạy các bài protocol tests bằng `pytest`:
 
 ```bash
-# Test tầng giao thức (frame packing/unpacking)
-python -m pytest tests/test_protocol.py -v
-
-# Test Multi-threading Server, Auth Lifecycle & Active Users
-python -m pytest tests/test_server.py -v
+python -m pytest tests/test_protocol.py
 ```
 
-### 2. Chạy Trực tiếp Client – Server
+### 2. Run Server Tests
 
-**Bước 1: Khởi chạy Server (Terminal 1)**
+```bash
+python -m pytest tests/test_server.py
+```
+
+### 3. Test Client–Server Communication
+
+**Terminal 1 — Khởi chạy Server**
 
 ```bash
 python server.py
 ```
 
-Server sẽ lắng nghe tại `0.0.0.0:9000` (theo `config.py`) và đọc tài khoản từ `users.json`.
+**Terminal 2 — Khởi chạy Client**
 
-**Bước 2: Khởi chạy Client (Terminal 2)**
-
-Chạy client mặc định (user `alice`, pass `123456`):
 ```bash
-python client.py
+python client.py "any_name"
 ```
 
-Hoặc chỉ định tài khoản khác trong `users.json`:
-```bash
-python client.py bob 123456
-python client.py charlie 123456
-python client.py admin admin
-```
+Thay `"any_name"` bằng tên client mong muốn.
 
-**Luồng hoạt động:**
-1. Client kết nối TCP tới server.
-2. Gửi thông điệp `AUTH` kèm username & password.
-3. Server xác thực qua `UserRegistry`, đăng ký vào bảng `Active Users` (atomic), trả về `AUTH_OK` kèm danh sách user online (hoặc `AUTH_FAIL` nếu sai thông tin / đã đăng nhập).
-4. Client nhận `AUTH_OK`, gửi lệnh `USER_LIST` để xem danh sách user online cập nhật.
-5. Client gửi `BYE` để đăng xuất an toàn (graceful disconnect). Server trả `ACK`, gỡ client khỏi `Active Users` và đóng socket.
+Nếu kết nối và handshake thành công, client sẽ gửi `HELLO`, nhận phản hồi `ACK` từ server, sau đó gửi thông điệp `BYE` để kết thúc phiên giao tiếp.
