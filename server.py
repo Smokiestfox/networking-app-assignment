@@ -31,20 +31,6 @@ class UserRegistry:
             except Exception as e:
                 print(f"[UserRegistry] Lỗi đọc {self.users_file}: {e}")
 
-        # Tài khoản mặc định nếu file chưa tồn tại hoặc rỗng
-        if not self.user_db:
-            self.user_db = {
-                "alice": "123456",
-                "bob": "123456",
-                "charlie": "123456",
-                "admin": "admin",
-            }
-            if self.users_file and not os.path.exists(self.users_file):
-                try:
-                    with open(self.users_file, "w", encoding="utf-8") as f:
-                        json.dump(self.user_db, f, indent=2)
-                except OSError:
-                    pass
 
     def authenticate(self, username: str, password: str = None) -> bool:
         """
