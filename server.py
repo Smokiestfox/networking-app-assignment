@@ -181,8 +181,8 @@ class CollaborationServer:
                     print(text, flush=True)
                     self.log_file_write(text)
 
-                # 2. Xử lý AUTH: authenticate() -> register() atomic -> AUTH_OK / AUTH_FAIL
-                elif msg_type == "AUTH":
+                # 2. Xử lý Đăng nhập (AUTH / LOGIN): authenticate() -> register() atomic -> AUTH_OK / AUTH_FAIL
+                elif msg_type in ("AUTH", "LOGIN"):
                     username = data.get("username") or data.get("client") or data.get("user")
                     password = data.get("password") or data.get("pass")
 
@@ -223,16 +223,17 @@ class CollaborationServer:
                         print(text, flush=True)
                         self.log_file_write(text)
 
-                # 3. Lệnh BYE: Client chủ động ngắt phiên
-                elif msg_type == "BYE":
+                # 3. Lệnh Đăng xuất / Ngắt phiên (BYE / LOGOUT): Client chủ động ngắt
+                elif msg_type in ("BYE", "LOGOUT"):
                     response = {"type": "ACK", "status": "BYE"}
                     try:
                         send_json_frame(conn, response)
                     except Exception:
                         pass
-                    text = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Client {client_id} sent BYE"
+                    text = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Client {client_id} sent {msg_type}"
                     print(text, flush=True)
                     self.log_file_write(text)
+                    break
                     break
 
                 # 4. Yêu cầu lấy danh sách user
