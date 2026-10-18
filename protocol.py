@@ -97,7 +97,11 @@ def recv_exact(sock, num_bytes: int):
 
 def send_frame(sock, data: bytes) -> None:
     header = FRAME_HEADER.pack(len(data))
-    sock.sendall(header + data)
+    payload = header + data
+    if hasattr(sock, "sendall"):
+        sock.sendall(payload)
+    else:
+        sock.write(payload)
 
 def recv_frame(sock):
     header_bytes = recv_exact(sock, FRAME_HEADER.size)

@@ -89,6 +89,7 @@ sequenceDiagram
     Server->>ClientB: FILE_CHUNK
     ClientB-->>Server: ACK
 ```
+
 # Protocol Specification & Connection States
 
 This section defines the core application message types, protocol vocabulary, and connection state transitions for the client-server architecture.
@@ -123,3 +124,86 @@ stateDiagram-v2
     ESTABLISHED --> CLOSING : Connection timeout / Network error
     CLOSING --> CLOSED : Cleanup resources & close socket
     ESTABLISHED --> CONNECTING : Reconnect / Session retry
+```
+
+## 3. Authentication Protocol Specification (AUTH, AUTH_OK, AUTH_FAIL)
+
+All authentication messages are exchanged over the TCP control channel (port 9000) using length-prefix framing with JSON payloads.
+
+### 3.1. AUTH Request (Client -> Server)
+Sent by the client immediately after the TCP handshake to authenticate and register its active session.
+
+| Field | Type | Required | Description | Example |
+| :--- | :---: | :---: | :--- | :--- |
+| `type` | string | Yes | Message identifier, must be `"AUTH"` | `"AUTH"` |
+| `username` | string | Yes | The user account name | `"alice"` |
+| `password` | string | Yes | The user account password | `"pass123"` |
+| `udp_port` | int | No | The client's listening UDP port for data channel | `9001` |
+
+**Example payload:**
+```json
+{
+  "type": "AUTH",
+  "username": "alice",
+  "password": "pass123",
+  "udp_port": 9001
+}
+```
+
+### 3.2. AUTH_OK Response (Server -> Client)
+Sent by the server when credentials are valid and the user is not currently logged in.
+
+| Field | Type | Required | Description | Example |
+| :--- | :---: | :---: | :--- | :--- |
+| `type` | string | Yes | Message identifier, must be `"AUTH_OK"` | `"AUTH_OK"` |
+| `username` | string | Yes | The authenticated username | `"alice"` |
+| `message` | string | No | Informational success message | `"Authentication successful"` |
+
+**Example payload:**
+```json
+{
+  "type": "AUTH_OK",
+  "username": "alice",
+  "message": "Authentication successful"
+}
+```
+
+### 3.3. AUTH_FAIL Response (Server -> Client)
+Sent by the server when authentication is rejected.
+
+| Field | Type | Required | Description | Example |
+| :--- | :---: | :---: | :--- | :--- |
+| `type` | string | Yes | Message identifier, must be `"AUTH_FAIL"` | `"AUTH_FAIL"` |
+| `reason` | string | Yes | Standard error code: `INVALID_CREDENTIALS`, `ALREADY_LOGGED_IN`, or `MALFORMED_REQUEST` | `"ALREADY_LOGGED_IN"` |
+| `message` | string | No | Human-readable explanation of failure | `"Account is already logged in"` |
+
+**Standard Reason Codes:**
+- `INVALID_CREDENTIALS`: Username does not exist in `users.json` or password does not match.
+- `ALREADY_LOGGED_IN`: An active session for this username already exists in `UserRegistry`.
+- `MALFORMED_REQUEST`: The `AUTH` payload is missing required fields or is not valid JSON.
+
+### 3.4. Authentication Flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client
+    participant Server
+    participant Registry as UserRegistry
+
+    Client->>Server: TCP connect
+    Server->>Client: {"type": "ACK", "status": "OK"} (Handshake)
+    Client->>Server: {"type": "AUTH", "username": "alice", "password": "pass123"}
+    
+    Server->>Registry: authenticate("alice", "pass123")
+    alt Credentials Invalid
+        Server->>Client: {"type": "AUTH_FAIL", "reason": "INVALID_CREDENTIALS"}
+    else Credentials Valid
+        Server->>Registry: register("alice", ip, port, sock)
+        alt Already Logged In
+            Server->>Client: {"type": "AUTH_FAIL", "reason": "ALREADY_LOGGED_IN"}
+        else Register Success
+            Server->>Client: {"type": "AUTH_OK", "username": "alice"}
+        end
+    end
+```
