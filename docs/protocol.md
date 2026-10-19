@@ -207,3 +207,46 @@ sequenceDiagram
         end
     end
 ```
+# Sequence Diagram Handshake -> Auth -> Disconnect
+sequenceDiagram
+    autonumber
+    actor Client
+    participant Server
+    participant UserRegistry
+
+    Note over Client,Server: Phase 1: TCP Connection & HELLO Handshake
+    Client->>Server: TCP SYN (Establish TCP Connection)
+    Server-->>Client: TCP SYN-ACK / ACK
+    Note right of Server: Connection accepted (CLOSED → CONNECTING)
+
+    Client->>Server: HELLO {"type": "HELLO", "client": "alice"}
+    Note right of Server: Server processes HELLO
+    Server-->>Client: ACK {"type": "ACK", "status": "OK"}
+    Note right of Client: Handshake successful (ESTABLISHED)
+
+    Note over Client,Server: Phase 2: Authentication (AUTH)
+    Client->>Server: AUTH {"type": "AUTH", "username": "alice", "password": "pass123"}
+    Server->>UserRegistry: authenticate("alice", "pass123")
+    UserRegistry-->>Server: True (Valid credentials)
+    Server->>UserRegistry: register("alice", IP, TCP_port, sock)
+    UserRegistry-->>Server: Success ("OK")
+    Server-->>Client: AUTH_OK {"type": "AUTH_OK", "status": "OK", "active_users": [...]}
+    Note right of Server: Active Users table updated (IP & TCP port tracked)
+
+    Note over Client,Server: Phase 3: Active Session & Disconnection
+    rect rgb(240, 240, 240)
+        Note right of Client: Client active, chatting / heartbeat / files
+    end
+
+    alt Graceful Disconnect
+        Client->>Server: BYE {"type": "BYE", "client": "alice"}
+        Note right of Server: Client closes connection gracefully (CLOSING)
+        Server->>UserRegistry: unregister("alice")
+        UserRegistry-->>Server: Removed from active users
+        Server-->>Client: Close TCP socket
+    else Abrupt Disconnect (Network drop / Crash / Ctrl+C)
+        Client x-) Server: Connection lost (ConnectionResetError)
+        Note right of Server: Server detects socket error in recv loop
+        Server->>UserRegistry: unregister("alice") (Automatic cleanup)
+        Note right of Server: State cleaned up, Active Users updated
+    end
