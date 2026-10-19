@@ -208,6 +208,7 @@ sequenceDiagram
     end
 ```
 # Sequence Diagram Handshake -> Auth -> Disconnect
+```mermaid
 sequenceDiagram
     autonumber
     actor Client
@@ -250,3 +251,4 @@ sequenceDiagram
         Server->>UserRegistry: unregister("alice") (Automatic cleanup)
         Note right of Server: State cleaned up, Active Users updated
     end
+'''
