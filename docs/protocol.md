@@ -207,7 +207,10 @@ sequenceDiagram
         end
     end
 ```
-# Sequence Diagram Handshake -> Auth -> Disconnect
+## State & Connection Sequence Diagram (Handshake -> Auth -> Disconnect)
+
+Sơ đồ trình tự (Sequence Diagram) mô tả toàn bộ vòng đời kết nối từ lúc Client thiết lập TCP, gửi bản tin `HELLO`, thực hiện xác thực `AUTH`, duy trì phiên và ngắt kết nối an toàn (`BYE` hoặc ngắt đột ngột):
+
 ```mermaid
 sequenceDiagram
     autonumber
@@ -218,7 +221,7 @@ sequenceDiagram
     Note over Client,Server: Phase 1: TCP Connection & HELLO Handshake
     Client->>Server: TCP SYN (Establish TCP Connection)
     Server-->>Client: TCP SYN-ACK / ACK
-    Note right of Server: Connection accepted (CLOSED → CONNECTING)
+    Note right of Server: Connection accepted (CLOSED -> CONNECTING)
 
     Client->>Server: HELLO {"type": "HELLO", "client": "alice"}
     Note right of Server: Server processes HELLO
@@ -251,4 +254,3 @@ sequenceDiagram
         Server->>UserRegistry: unregister("alice") (Automatic cleanup)
         Note right of Server: State cleaned up, Active Users updated
     end
-'''
