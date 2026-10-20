@@ -83,3 +83,7 @@ Thumbs.db
 received_*
 temp/
 tmp/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.log
