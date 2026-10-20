@@ -46,15 +46,19 @@ def test_packet_decode_invalid_magic_or_version():
         protocol.decode_packet(invalid_data)
 
 def test_json_frame_transmission_simulation():
-    import io
-    fake_socket = io.BytesIO()
-    
-    test_obj = {"username": "Alice", "status": "online"}
-    
-    protocol.send_json_frame(fake_socket, test_obj)
-    
-    fake_socket.seek(0)
-  
-    received_obj = protocol.recv_json_frame(fake_socket)
-    
-    assert received_obj == test_obj
+    import socket
+    # Dùng socketpair để mô phỏng kết nối thật (sendall/recv)
+    server_sock, client_sock = socket.socketpair()
+
+    try:
+        test_obj = {"username": "Alice", "status": "online"}
+
+        protocol.send_json_frame(client_sock, test_obj)
+
+        received_obj = protocol.recv_json_frame(server_sock)
+
+        assert received_obj == test_obj
+    finally:
+        client_sock.close()
+        server_sock.close()
+

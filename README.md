@@ -31,36 +31,60 @@ Môn: Network Application Development, Assignment 1.
     └── protocol.md      # đặc tả giao thức
 ```
 
-## Demo và 
+## Hướng dẫn chạy và Demo (Week 2: State & Concurrency)
 
-### 1. Run Protocol Tests
+### 1. Chạy toàn bộ Unit Tests tự động
 
-Chạy các bài protocol tests bằng `pytest`:
-
-```bash
-python -m pytest tests/test_protocol.py
-```
-
-### 2. Run Server Tests
+Kiểm tra toàn bộ giao thức (protocol), xác thực (authentication) và khả năng xử lý đa luồng (multi-threading):
 
 ```bash
-python -m pytest tests/test_server.py
+python -m pytest tests -v
 ```
 
-### 3. Test Client–Server Communication
+*(Hoặc chạy riêng từng bài test: `python -m pytest tests/test_protocol.py` hoặc `python -m pytest tests/test_server.py`)*
 
-**Terminal 1 — Khởi chạy Server**
+---
+
+### 2. Demo tương tác Client – Server (Authentication & Session)
+
+**Bước 1: Khởi chạy Server (Terminal 1)**
 
 ```bash
 python server.py
 ```
 
-**Terminal 2 — Khởi chạy Client**
+Server sẽ lắng nghe trên cổng `9000` (TCP), quản lý đa luồng và hiển thị bảng Active Users thời gian thực.
+
+**Bước 2: Khởi chạy Client (Terminal 2)**
 
 ```bash
-python client.py "any_name"
+# Đăng nhập với tài khoản có trong users.json:
+python client.py alice 123456
+
+# Hoặc chạy tương tác để nhập từ bàn phím:
+python client.py
 ```
 
-Thay `"any_name"` bằng tên client mong muốn.
+- **Luồng xử lý:** Client tự động thực hiện handshake `HELLO -> ACK`, gửi xác thực `AUTH -> AUTH_OK`, và in bảng danh sách user đang online.
+- **Lệnh tương tác:**
+  - Gõ `list` để làm mới danh sách user online.
+  - Gõ `quit` hoặc nhấn `Ctrl+C` để gửi `BYE` và kết thúc phiên an toàn.
 
-Nếu kết nối và handshake thành công, client sẽ gửi `HELLO`, nhận phản hồi `ACK` từ server, sau đó gửi thông điệp `BYE` để kết thúc phiên giao tiếp.
+---
+
+### 3. Demo mô phỏng tải 10–15 Client đồng thời (Concurrency Load Test)
+
+Dùng để kiểm chứng tiêu chí **Rubric 3 (State Tracking)** & **Rubric 4 (Multi-threaded Concurrency)**:
+
+**Bước 1:** Đảm bảo Server đang chạy ở Terminal 1 (`python server.py`).
+
+**Bước 2:** Mở Terminal 2 và kích hoạt script mô phỏng:
+
+```bash
+python simulate_demo.py --count 12 --duration 10
+```
+
+- Script sẽ khởi tạo đồng thời 12 luồng client độc lập (`user01` đến `user12`).
+- Toàn bộ 12 client kết nối, xác thực thành công và giữ kết nối trong 10 giây.
+- **Quan sát màn hình Server:** Server sẽ in bảng **Active Users Table** hiển thị đầy đủ 12 client (Username, IP, Active Port) cùng online đồng thời.
+- Sau 10 giây, toàn bộ client tự động gửi `BYE` ngắt kết nối an toàn và dọn dẹp state sạch sẽ.
