@@ -85,7 +85,7 @@ def run_simulation(count: int = 12, duration: float = 10.0, host: str = "127.0.0
 
     # Test usernames
     usernames = [f"user{i:02d}" for i in range(1, count + 1)]
-    default_password = "123456"
+    default_password = "pass123"
 
     threads = []
     results = {}

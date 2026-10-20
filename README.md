@@ -59,7 +59,7 @@ Server sẽ lắng nghe trên cổng `9000` (TCP), quản lý đa luồng và hi
 
 ```bash
 # Đăng nhập với tài khoản có trong users.json:
-python client.py alice 123456
+python client.py alice pass123
 
 # Hoặc chạy tương tác để nhập từ bàn phím:
 python client.py
