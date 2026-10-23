@@ -54,7 +54,7 @@ def test_login_success():
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.connect(("127.0.0.1", test_port))
 
-        send_json_frame(sock, {"type": "AUTH", "username": "alice", "password": "123456"})
+        send_json_frame(sock, {"type": "AUTH", "username": "alice", "password": "pass123"})
         response = recv_json_frame(sock)
 
         assert response is not None
@@ -115,7 +115,7 @@ def test_duplicate_login_rejected():
     try:
         sock1 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock1.connect(("127.0.0.1", test_port))
-        send_json_frame(sock1, {"type": "AUTH", "username": "bob", "password": "123456"})
+        send_json_frame(sock1, {"type": "AUTH", "username": "bob", "password": "pass123"})
         resp1 = recv_json_frame(sock1)
         assert resp1.get("type") == "AUTH_OK"
 
@@ -139,9 +139,9 @@ def test_sequential_logins():
     """Test 4: 3 user đăng nhập tuần tự, mỗi user login rồi logout."""
     test_port = 9104
     users = [
-        ("alice", "123456"),
-        ("bob", "123456"),
-        ("charlie", "123456"),
+        ("alice", "pass123"),
+        ("bob", "pass123"),
+        ("carol", "pass123"),
     ]
     server = CollaborationServer(host="127.0.0.1", port=test_port)
     server_thread = threading.Thread(target=server.run, daemon=True)
@@ -184,15 +184,15 @@ def test_abrupt_disconnect_unregisters_user():
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.connect(("127.0.0.1", test_port))
-        send_json_frame(sock, {"type": "AUTH", "username": "charlie", "password": "123456"})
+        send_json_frame(sock, {"type": "AUTH", "username": "carol", "password": "pass123"})
         resp = recv_json_frame(sock)
         assert resp.get("type") == "AUTH_OK"
-        assert server.registry.is_active("charlie") is True
+        assert server.registry.is_active("carol") is True
 
         # Ngắt đột ngột
         sock.close()
         time.sleep(0.2)
-        assert server.registry.is_active("charlie") is False
+        assert server.registry.is_active("carol") is False
     finally:
         try:
             server.sock.close()
@@ -217,7 +217,7 @@ def test_abrupt_disconnect_recovery():
 
         sock2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock2.connect(("127.0.0.1", test_port))
-        send_json_frame(sock2, {"type": "AUTH", "username": "alice", "password": "123456"})
+        send_json_frame(sock2, {"type": "AUTH", "username": "alice", "password": "pass123"})
         response = recv_json_frame(sock2)
 
         assert response is not None
@@ -235,10 +235,10 @@ def test_concurrent_multithreading():
     """Test 7: 5 client kết nối đồng thời, mỗi client login thành công."""
     test_port = 9107
     users = [
-        ("alice", "123456"),
-        ("bob", "123456"),
-        ("charlie", "123456"),
-        ("admin", "admin"),
+        ("alice", "pass123"),
+        ("bob", "pass123"),
+        ("carol", "pass123"),
+        ("dave", "pass123"),
     ]
     server = CollaborationServer(host="127.0.0.1", port=test_port)
     server_thread = threading.Thread(target=server.run, daemon=True)
@@ -290,7 +290,7 @@ def test_logout_msg_type():
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.connect(("127.0.0.1", test_port))
 
-        send_json_frame(sock, {"type": "LOGIN", "username": "alice", "password": "123456"})
+        send_json_frame(sock, {"type": "LOGIN", "username": "alice", "password": "pass123"})
         response = recv_json_frame(sock)
         assert response.get("type") == "AUTH_OK"
         assert server.registry.is_active("alice") is True
