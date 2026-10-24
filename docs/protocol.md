@@ -352,6 +352,7 @@ sequenceDiagram
 ```
 
 ## 10. Sequence Diagram cho Broadcast, Unitcast và Heartbeat
+```mermaid
 sequenceDiagram
     autonumber
     actor Alice as Client Alice
@@ -391,3 +392,4 @@ sequenceDiagram
         Server->>Bob: Broadcast updated USER_LIST (Alice offline)
         Server->>Charlie: Broadcast updated USER_LIST (Alice offline)
     end
+```
