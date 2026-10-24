@@ -351,7 +351,7 @@ sequenceDiagram
     end
 ```
 
-## 10. Sequence Diagram cho Broadcast, Unitcast và Heartbeat
+## 10. Sequence Diagram cho Broadcast, Unicast và Heartbeat
 a) Sequence Diagram cho Broadcast chat
 ```mermaid
 sequenceDiagram
@@ -366,7 +366,7 @@ sequenceDiagram
     Server->>Bob: Forward UDP Datagram (from="alice", text="Hello")
     Server->>Charlie: Forward UDP Datagram (from="alice", text="Hello")
 ```
-b) Sequence Diagram cho Unitcast chat
+b) Sequence Diagram cho Unicast chat
 ```mermaid
 sequenceDiagram
     autonumber
