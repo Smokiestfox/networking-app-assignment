@@ -1,11 +1,13 @@
 # Protocol Specification
 
+## 1. Transport Overview (TCP 9000 / UDP 9001)
+
 Core collaboration traffic uses raw sockets.
 
 - **TCP port 9000**: Control channel for server hello, authentication, and liveness. Uses length-prefix framing to preserve message boundaries over TCP byte streams.
 - **UDP port 9001**: Data channel for heartbeat, user discovery, real-time messaging, and file chunk transfer with application-layer reliability.
 
-## 1. TCP Framing (Length-Prefix)
+## 2. TCP Framing (Length-Prefix)
 
 TCP is a stream-oriented transport protocol with no built-in message boundaries. Without framing, consecutive writes can suffer from packet coalescing (sticky packets) or network fragmentation, causing multiple messages to merge or split across `recv()` calls.
 
@@ -23,13 +25,13 @@ To ensure deterministic message parsing, all control traffic over TCP is enclose
   - **Sender (`send_frame`)**: Computes `len(payload)`, packs the 4-byte header, and sends `header + payload` via `sendall()`.
   - **Receiver (`recv_frame`)**: Reads exactly 4 bytes using a looped `recv()` (`recv_exact`) to decode the expected payload size, then reads exactly that number of bytes before handing the buffer to the JSON decoder. Returns `None` on clean socket closure.
 
-## 2. Packet Format (UDP / Core Protocol)
+## 3. Packet Format (UDP / Core Protocol)
 
 UDP datagrams share a fixed 37-byte binary header followed by a variable-length payload. Fields are encoded in network byte order (Big-Endian).
 
 Struct format: `!2sBBB II 16s H H I` (Total header size: 37 bytes).
 
-### Header Fields
+### 3.1 Header Fields
 
 | Field | Size | Type | Description | Example |
 | --- | ---: | :---: | --- | --- |
@@ -44,7 +46,7 @@ Struct format: `!2sBBB II 16s H H I` (Total header size: 37 bytes).
 | Total chunks | 2 bytes | `H` (uint16) | Total number of chunks in the transfer | `1` |
 | Payload length | 4 bytes | `I` (uint32) | Size of payload data following the header (bytes) | `64` |
 
-### Packet Types
+### 3.2 Packet Types
 
 | Value | Name | Description |
 | :---: | --- | --- |
@@ -55,7 +57,7 @@ Struct format: `!2sBBB II 16s H H I` (Total header size: 37 bytes).
 | 5 | `ACK` | Acknowledgment packet carrying acknowledged sequence number |
 | 6 | `USER_LIST` | Broadcast list of currently active users |
 
-### Control Flags
+### 3.3 Control Flags
 
 | Bit | Name | Value | Description |
 | :---: | --- | :---: | --- |
@@ -66,35 +68,92 @@ Payloads with `FLAG_ENCRYPTED` set are encrypted using Fernet symmetric encrypti
 
 Reliable UDP uses sequence numbers, ACKs, retransmission timeouts, and a sliding window.
 
-## 3. Message Flow
+### 3.4 UDP Message Payloads
 
-```mermaid
-sequenceDiagram
-    ClientA->>Server: UDP MSG(seq)
-    Server-->>ClientA: ACK(seq)
-    Server->>ClientB: UDP MSG(new seq)
-    ClientB-->>Server: ACK(new seq)
+The payload that follows the 37-byte header is a UTF-8 encoded JSON object, unless the packet type says otherwise. `encode_packet()` in `protocol.py` encrypts every non-empty payload with Fernet by default and sets `FLAG_ENCRYPTED`; `decode_packet()` decrypts it automatically. The JSON examples below show the payload **before** encryption. (If the team decides to send Week 3 packets in plaintext for easier debugging, call `encode_packet(..., encrypt=False)` and update this paragraph.)
+
+> **Two different `USER_LIST` messages:**
+> - **TCP control message** (`{"type": "USER_LIST"}` request, `{"type": "USER_LIST", "status": "OK", "users": [...]}` response): the client asks for the list on demand. Each user is `{"username", "ip", "port"}`.
+> - **UDP packet type 6**: pushed by the server to all clients when the set of online users changes. Payload is `{"users": ["alice", "bob"]}` (usernames only).
+
+#### MSG (type = 2), Client <-> Server
+
+Used for both broadcast and unicast chat messages.
+
+| Field  | Type   | Required | Description                                                  | Example        |
+| ------ | ------ | :------: | ------------------------------------------------------------ | -------------- |
+| `to`   | string |   Yes    | `"*"` for broadcast, otherwise the recipient's username       | `"*"`, `"bob"` |
+| `from` | string |   Yes    | Username of the sender                                       | `"alice"`      |
+| `text` | string |   Yes    | Message content                                              | `"hello"`      |
+| `time` | number |   Yes    | Unix timestamp in seconds, set by the sender                 | `1761300000`   |
+
+```json
+{"to": "*", "from": "alice", "text": "hello everyone", "time": 1761300000}
 ```
 
-## 4. File Flow
-
-```mermaid
-sequenceDiagram
-    ClientA->>Server: FILE_META
-    Server-->>ClientA: ACK
-    loop sliding window
-        ClientA->>Server: FILE_CHUNK
-        Server-->>ClientA: ACK
-    end
-    Server->>ClientB: FILE_CHUNK
-    ClientB-->>Server: ACK
+```json
+{"to": "bob", "from": "alice", "text": "hi bob", "time": 1761300005}
 ```
 
-# Protocol Specification & Connection States
+Routing rules:
+- `to = "*"`: the server forwards the message to every online user (see the server plan for whether the sender is excluded).
+- `to = <username>`: the server forwards the message only to that user.
+
+#### HEARTBEAT (type = 1), Client -> Server
+
+Sent periodically (every 2 seconds) by an authenticated client. The server updates the user's `last_seen` time. If no heartbeat arrives for 10 seconds, the server removes the user.
+
+| Field      | Type   | Required | Description                         | Example   |
+| ---------- | ------ | :------: | ----------------------------------- | --------- |
+| `username` | string |   Yes    | Username of the client that is alive | `"alice"` |
+
+```json
+{"username": "alice"}
+```
+
+#### USER_LIST (type = 6), Server -> Client
+
+Sent by the server whenever the set of online users changes (a user logs in, leaves, or is removed by timeout).
+
+| Field   | Type            | Required | Description                      | Example             |
+| ------- | --------------- | :------: | -------------------------------- | ------------------- |
+| `users` | array of string |   Yes    | Usernames of all online users    | `["alice", "bob"]`  |
+
+```json
+{"users": ["alice", "bob"]}
+```
+
+### 3.5 Header Field Values per Packet Type
+
+| Packet type | Flags (set by `encode_packet`) | Sequence number           | Ack number | Message ID        | Chunk index | Total chunks |
+| ----------- | :---: | ------------------------- | :--------: | ----------------- | :---------: | :----------: |
+| `HEARTBEAT` | `FLAG_ENCRYPTED` | increasing per sender     | `0`        | 16 zero bytes     | `0`         | `1`          |
+| `MSG`       | `FLAG_ENCRYPTED` | increasing per sender     | `0`        | `uuid4().bytes`   | `0`         | `1`          |
+| `USER_LIST` | `FLAG_ENCRYPTED` | increasing per server     | `0`        | 16 zero bytes     | `0`         | `1`          |
+
+Notes:
+- The sequence number starts at 1 and increases by 1 for every datagram a sender transmits. It is filled in now so that Week 4 only needs to add ACK handling and retransmission.
+- The ack number stays `0` until the reliability layer is added.
+- Every UDP datagram carries exactly one packet. No length prefix is used on UDP, because the datagram boundary already marks the end of the packet.
+- Keep the whole datagram (header + payload) below about 1400 bytes to avoid IP fragmentation. Because Fernet encryption makes the payload roughly 4/3 of its plaintext size plus some tens of bytes, the plaintext JSON must be well under 1000 bytes. The helpers enforce `MAX_UDP_SIZE = 1400` bytes and `MAX_TEXT_LEN = 250` characters (250 Vietnamese characters with diacritics, 3 bytes each in UTF-8, still fit after encryption). Payload JSON is written as UTF-8, not `\uXXXX` escapes, otherwise accented text would be about twice as large.
+
+### 3.6 Packet Helper Functions (`protocol.py`)
+
+Helpers for building and parsing UDP packets. They are thin wrappers around the existing `Packet`, `encode_packet()` and `decode_packet()` in `protocol.py`. The server and the client must use these helpers instead of calling `struct` directly.
+
+| Function                                  | Description                                                                  |
+| ----------------------------------------- | ---------------------------------------------------------------------------- |
+| `pack_udp(ptype, payload, seq, ...)`      | Builds a full datagram: 37-byte header + payload bytes. Returns `bytes`.     |
+| `unpack_udp(data)`                        | Parses a datagram into a header and a payload. Raises an error if the magic number, version, or payload length is invalid. |
+| `pack_msg(to, sender, text, seq)`         | Convenience wrapper that builds a `MSG` packet (adds `time` automatically).  |
+| `pack_heartbeat(username, seq)`           | Convenience wrapper that builds a `HEARTBEAT` packet.                        |
+| `pack_user_list(users, seq)`              | Convenience wrapper that builds a `USER_LIST` packet.                        |
+
+Error handling: a datagram that is too short, has the wrong magic number, or whose declared payload length does not match the received data must be rejected with an error (and ignored by the receiver), never silently accepted.
+
+## 4. Message Types & Protocol Vocabulary
 
 This section defines the core application message types, protocol vocabulary, and connection state transitions for the client-server architecture.
-
-## 1. Message Types & Protocol Vocabulary
 
 To ensure clear communication between clients and the server, all application messages are categorized into a standardized protocol vocabulary.
 
@@ -109,9 +168,10 @@ To ensure clear communication between clients and the server, all application me
 | 1 | `HEARTBEAT` | Client $\rightarrow$ Server | UDP | Periodic liveness signal to maintain active session presence. |
 | 3 | `FILE_META` | Client $\leftrightarrow$ Server | TCP / UDP | File transfer metadata including filename, size, and total chunks. |
 | 4 | `FILE_CHUNK` | Client $\leftrightarrow$ Server | UDP | Raw binary segment / chunk of an active file transfer. |
+|      6       | `USER_LIST`  |   Server $\rightarrow$ Client   |    UDP    | Broadcast list of currently active users, sent when the user set changes.  |
 | - | `BYE` | Client $\leftrightarrow$ Server | TCP / UDP | Graceful disconnection notice indicating session teardown. |
 
-## 2. Connection State Diagram
+## 5. Connection State Diagram
 
 The connection lifecycle transitions through distinct states managed by event triggers on both the client and server sides.
 
@@ -126,11 +186,11 @@ stateDiagram-v2
     ESTABLISHED --> CONNECTING : Reconnect / Session retry
 ```
 
-## 3. Authentication Protocol Specification (AUTH, AUTH_OK, AUTH_FAIL)
+## 6. Authentication Protocol (AUTH, AUTH_OK, AUTH_FAIL)
 
 All authentication messages are exchanged over the TCP control channel (port 9000) using length-prefix framing with JSON payloads.
 
-### 3.1. AUTH Request (Client -> Server)
+### 6.1 AUTH Request (Client -> Server)
 Sent by the client immediately after the TCP handshake to authenticate and register its active session.
 
 | Field | Type | Required | Description | Example |
@@ -138,7 +198,7 @@ Sent by the client immediately after the TCP handshake to authenticate and regis
 | `type` | string | Yes | Message identifier, must be `"AUTH"` | `"AUTH"` |
 | `username` | string | Yes | The user account name | `"alice"` |
 | `password` | string | Yes | The user account password | `"pass123"` |
-| `udp_port` | int | No | The client's listening UDP port for data channel | `9001` |
+| `udp_port` | int | No | The UDP port the client listens on to receive data-channel packets (not the server's port 9001). The server combines it with the client's IP address from `accept()` to know where to send UDP packets. | `50001` |
 
 **Example payload:**
 ```json
@@ -146,43 +206,51 @@ Sent by the client immediately after the TCP handshake to authenticate and regis
   "type": "AUTH",
   "username": "alice",
   "password": "pass123",
-  "udp_port": 9001
+  "udp_port": 50001
 }
 ```
 
-### 3.2. AUTH_OK Response (Server -> Client)
+### 6.2 AUTH_OK Response (Server -> Client)
 Sent by the server when credentials are valid and the user is not currently logged in.
 
-| Field | Type | Required | Description | Example |
-| :--- | :---: | :---: | :--- | :--- |
-| `type` | string | Yes | Message identifier, must be `"AUTH_OK"` | `"AUTH_OK"` |
-| `username` | string | Yes | The authenticated username | `"alice"` |
-| `message` | string | No | Informational success message | `"Authentication successful"` |
+| Field       | Type            | Required | Description                                                        | Example                                  |
+| ----------- | --------------- | :------: | ------------------------------------------------------------------ | ---------------------------------------- |
+| `type`      | string          |   Yes    | Must be `"AUTH_OK"`                                                | `"AUTH_OK"`                              |
+| `status`    | string          |   Yes    | Always `"OK"`                                                      | `"OK"`                                   |
+| `user`      | string          |   Yes    | The authenticated username                                         | `"alice"`                                |
+| `users`     | array of object |   Yes    | Currently online users, each `{"username", "ip", "port"}`          | `[{"username":"bob","ip":"127.0.0.1","port":52134}]` |
+| `user_list` | array of object |    No    | Duplicate of `users` kept for compatibility                        | same as `users`                          |
 
 **Example payload:**
 ```json
 {
   "type": "AUTH_OK",
-  "username": "alice",
-  "message": "Authentication successful"
+  "status": "OK",
+  "user": "alice",
+  "users": [{"username": "bob", "ip": "127.0.0.1", "port": 52134}],
+  "user_list": [{"username": "bob", "ip": "127.0.0.1", "port": 52134}]
 }
 ```
 
-### 3.3. AUTH_FAIL Response (Server -> Client)
+### 6.3 AUTH_FAIL Response (Server -> Client)
 Sent by the server when authentication is rejected.
 
-| Field | Type | Required | Description | Example |
-| :--- | :---: | :---: | :--- | :--- |
-| `type` | string | Yes | Message identifier, must be `"AUTH_FAIL"` | `"AUTH_FAIL"` |
-| `reason` | string | Yes | Standard error code: `INVALID_CREDENTIALS`, `ALREADY_LOGGED_IN`, or `MALFORMED_REQUEST` | `"ALREADY_LOGGED_IN"` |
-| `message` | string | No | Human-readable explanation of failure | `"Account is already logged in"` |
+| Field     | Type   | Required | Description                                                                    | Example                                  |
+| --------- | ------ | :------: | ------------------------------------------------------------------------------ | ---------------------------------------- |
+| `type`    | string |   Yes    | Must be `"AUTH_FAIL"`                                                          | `"AUTH_FAIL"`                            |
+| `status`  | string |   Yes    | Always `"ERROR"`                                                               | `"ERROR"`                                |
+| `message` | string |   Yes    | Human-readable cause: invalid username/password, or user already logged in     | `"User 'alice' already logged in"`       |
 
-**Standard Reason Codes:**
-- `INVALID_CREDENTIALS`: Username does not exist in `users.json` or password does not match.
-- `ALREADY_LOGGED_IN`: An active session for this username already exists in `UserRegistry`.
-- `MALFORMED_REQUEST`: The `AUTH` payload is missing required fields or is not valid JSON.
+**Example payload:**
+```json
+{
+  "type": "AUTH_FAIL",
+  "status": "ERROR",
+  "message": "Authentication failed: invalid username or password"
+}
+```
 
-### 3.4. Authentication Flow
+### 6.4 Authentication Flow
 
 ```mermaid
 sequenceDiagram
@@ -197,17 +265,44 @@ sequenceDiagram
     
     Server->>Registry: authenticate("alice", "pass123")
     alt Credentials Invalid
-        Server->>Client: {"type": "AUTH_FAIL", "reason": "INVALID_CREDENTIALS"}
+        Server->>Client: {"type": "AUTH_FAIL", "status": "ERROR", "message": "Authentication failed: invalid username or password"}
     else Credentials Valid
         Server->>Registry: register("alice", ip, port, sock)
         alt Already Logged In
-            Server->>Client: {"type": "AUTH_FAIL", "reason": "ALREADY_LOGGED_IN"}
+            Server->>Client: {"type": "AUTH_FAIL", "status": "ERROR", "message": "User 'alice' already logged in"}
         else Register Success
-            Server->>Client: {"type": "AUTH_OK", "username": "alice"}
+            Server->>Client: {"type": "AUTH_OK", "status": "OK", "user": "alice", "users": [...]}
         end
     end
 ```
-## State & Connection Sequence Diagram (Handshake -> Auth -> Disconnect)
+
+## 7. Message Flow
+
+```mermaid
+sequenceDiagram
+    ClientA->>Server: UDP MSG(seq)
+    Server-->>ClientA: ACK(seq)
+    Server->>ClientB: UDP MSG(new seq)
+    ClientB-->>Server: ACK(new seq)
+```
+
+> **Note (Week 3):** In this version, `MSG` and `HEARTBEAT` are sent over plain UDP without ACK or retransmission, so a lost datagram is not recovered. The ACK and retransmission shown above will be added in Week 4 together with the sliding window. The sequence diagrams for broadcast, unicast, and heartbeat are added by the testing/diagram owner.
+
+## 8. File Flow
+
+```mermaid
+sequenceDiagram
+    ClientA->>Server: FILE_META
+    Server-->>ClientA: ACK
+    loop sliding window
+        ClientA->>Server: FILE_CHUNK
+        Server-->>ClientA: ACK
+    end
+    Server->>ClientB: FILE_CHUNK
+    ClientB-->>Server: ACK
+```
+
+## 9. Connection Sequence Diagram (Handshake -> Auth -> Disconnect)
 
 Sơ đồ trình tự (Sequence Diagram) mô tả toàn bộ vòng đời kết nối từ lúc Client thiết lập TCP, gửi bản tin `HELLO`, thực hiện xác thực `AUTH`, duy trì phiên và ngắt kết nối an toàn (`BYE` hoặc ngắt đột ngột):
 
@@ -234,7 +329,7 @@ sequenceDiagram
     UserRegistry-->>Server: True (Valid credentials)
     Server->>UserRegistry: register("alice", IP, TCP_port, sock)
     UserRegistry-->>Server: Success ("OK")
-    Server-->>Client: AUTH_OK {"type": "AUTH_OK", "status": "OK", "active_users": [...]}
+    Server-->>Client: AUTH_OK {"type": "AUTH_OK", "status": "OK", "user": "alice", "users": [...]}
     Note right of Server: Active Users table updated (IP & TCP port tracked)
 
     Note over Client,Server: Phase 3: Active Session & Disconnection
@@ -254,3 +349,4 @@ sequenceDiagram
         Server->>UserRegistry: unregister("alice") (Automatic cleanup)
         Note right of Server: State cleaned up, Active Users updated
     end
+```
