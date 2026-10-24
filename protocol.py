@@ -1,6 +1,8 @@
 import json
 import struct
 import uuid
+import threading
+import time
 from dataclasses import dataclass
 from cryptography.fernet import Fernet
 from config import FERNET_KEY
@@ -17,6 +19,18 @@ USER_LIST = 6
 
 FLAG_ENCRYPTED = 1
 FLAG_END = 2
+
+MAX_UDP_SIZE = 1400      # max datagram size (header + encrypted payload) to avoid IP fragmentation
+MAX_TEXT_LEN = 250       # max characters of a chat message (250 x 3-byte UTF-8 chars still fits MAX_UDP_SIZE after Fernet)
+NIL_ID = uuid.UUID(int=0)  # msg_id for packets that are not part of a message/file session
+ 
+# Required JSON keys of each UDP payload type
+REQUIRED_KEYS = {
+    MSG: ("to", "from", "text", "time"),
+    HEARTBEAT: ("username",),
+    USER_LIST: ("users",),
+}
+ 
 
 HEADER = struct.Struct("!2sBBB II 16s H H I") # thêm một số nguyên I cho ack
 FRAME_HEADER = struct.Struct("!I")  # 4 bytes số nguyên không dấu (uint32) Big-Endian
@@ -123,3 +137,74 @@ def recv_json_frame(sock):
     if raw is None:
         return None
     return json_obj(raw)
+
+
+ 
+class SeqCounter:
+    """Thread-safe, monotonically increasing sequence number (starts at 1)."""
+ 
+    def __init__(self):
+        self._value = 0
+        self._lock = threading.Lock()
+ 
+    def next(self) -> int:
+        with self._lock:
+            self._value += 1
+            return self._value
+ 
+ 
+def build_udp(ptype: int, body: dict, seq: int, msg_id=None, ack: int = 0,
+              encrypt: bool = True) -> bytes:
+    """Serialize `body` as JSON and wrap it into a full UDP datagram (37-byte header + payload)."""
+    packet = Packet(
+        ptype=ptype,
+        seq=seq,
+        msg_id=msg_id if msg_id is not None else NIL_ID,
+        ack=ack,
+        payload=json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8"),  # keep non-ASCII text as UTF-8 (shorter than \u escapes)
+    )
+    data = encode_packet(packet, encrypt=encrypt)
+    if len(data) > MAX_UDP_SIZE:
+        raise ValueError(f"datagram too large: {len(data)} > {MAX_UDP_SIZE} bytes")
+    return data
+ 
+ 
+def parse_udp(data: bytes):
+    """Parse a datagram. Returns (Packet, body_dict). Raises ValueError for any invalid datagram."""
+    if len(data) < HEADER.size:
+        raise ValueError("short packet")
+    declared = HEADER.unpack(data[:HEADER.size])[-1]       # payload length field
+    if len(data) != HEADER.size + declared:
+        raise ValueError("payload length does not match datagram size")
+    try:
+        packet = decode_packet(data)                       # also decrypts if FLAG_ENCRYPTED
+        body = json_obj(packet.payload) if packet.payload else {}
+    except ValueError:
+        raise
+    except Exception as exc:                               # InvalidToken, UnicodeDecodeError, ...
+        raise ValueError(f"invalid payload: {exc}") from exc
+    if not isinstance(body, dict):
+        raise ValueError("payload must be a JSON object")
+    missing = [k for k in REQUIRED_KEYS.get(packet.ptype, ()) if k not in body]
+    if missing:
+        raise ValueError(f"missing fields {missing} in packet type {packet.ptype}")
+    return packet, body
+ 
+ 
+def pack_msg(to: str, sender: str, text: str, seq: int, **kwargs) -> bytes:
+    """MSG: `to` is "*" (broadcast) or a username (unicast). The server overwrites `from`."""
+    if not text or len(text) > MAX_TEXT_LEN:
+        raise ValueError(f"text must be 1..{MAX_TEXT_LEN} characters")
+    body = {"to": to, "from": sender, "text": text, "time": int(time.time())}
+    return build_udp(MSG, body, seq, msg_id=new_id(), **kwargs)
+ 
+ 
+def pack_heartbeat(username: str, seq: int, **kwargs) -> bytes:
+    """HEARTBEAT: periodic liveness signal (client -> server)."""
+    return build_udp(HEARTBEAT, {"username": username}, seq, **kwargs)
+ 
+ 
+def pack_user_list(users, seq: int, **kwargs) -> bytes:
+    """USER_LIST: list of online usernames (server -> clients)."""
+    return build_udp(USER_LIST, {"users": list(users)}, seq, **kwargs)
+ 
