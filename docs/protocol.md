@@ -350,3 +350,44 @@ sequenceDiagram
         Note right of Server: State cleaned up, Active Users updated
     end
 ```
+
+## 10. Sequence Diagram cho Broadcast, Unitcast và Heartbeat
+sequenceDiagram
+    autonumber
+    actor Alice as Client Alice
+    participant Server as UDP Server (Port 9001)
+    actor Bob as Client Bob
+    actor Charlie as Client Charlie
+    participant UserRegistry
+
+    Note over Alice,Charlie: Phase 1: Broadcast Chat (Chat chung '*')
+    Alice->>Server: UDP Datagram (MSG, to="*", text="Hello everyone!")
+    Note right of Server: Parse & decrypt UDP payload
+    Server->>Bob: Forward UDP (MSG, from="alice", text="Hello everyone!")
+    Server->>Charlie: Forward UDP (MSG, from="alice", text="Hello everyone!")
+    Note right of Bob: Bob receives broadcast message
+    Note right of Charlie: Charlie receives broadcast message
+
+    Note over Alice,Charlie: Phase 2: Unicast Chat (Chat riêng qua /to)
+    Alice->>Server: UDP Datagram (MSG, to="bob", text="Hi Bob, secret message")
+    Note right of Server: Lookup 'bob' in UserRegistry for IP & Port
+    Server->>Bob: Forward UDP (MSG, from="alice", text="Hi Bob, secret message")
+    Note right of Charlie: Charlie does NOT receive this message
+
+    Note over Alice,Server: Phase 3: Periodic Heartbeat & Liveness
+    loop Every 2 seconds
+        Alice->>Server: UDP Datagram (HEARTBEAT, username="alice")
+        Note right of Server: Update last_seen["alice"] = current_time
+    end
+
+    Note over Alice: Client Alice drops connection abruptly (Network drop / Crash)
+    
+    rect rgb(240, 240, 240)
+        Note right of Server: Cleanup Loop (Background Daemon Task)
+        Server->>Server: Scan last_seen map (now - last_seen > 10s timeout)
+        Note right of Server: Detect Alice is stale (> 10s without heartbeat)
+        Server->>UserRegistry: unregister("alice")
+        UserRegistry-->>Server: Removed from active users list
+        Server->>Bob: Broadcast updated USER_LIST (Alice offline)
+        Server->>Charlie: Broadcast updated USER_LIST (Alice offline)
+    end
