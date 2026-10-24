@@ -352,44 +352,54 @@ sequenceDiagram
 ```
 
 ## 10. Sequence Diagram cho Broadcast, Unitcast và Heartbeat
+a) Sequence Diagram cho Broadcast chat
 ```mermaid
 sequenceDiagram
     autonumber
-    actor Alice as Client Alice
+    participant Alice as Client Alice
     participant Server as UDP Server (Port 9001)
-    actor Bob as Client Bob
-    actor Charlie as Client Charlie
-    participant UserRegistry
+    participant Bob as Client Bob
+    participant Charlie as Client Charlie
 
-    Note over Alice,Charlie: Phase 1: Broadcast Chat (Chat chung '*')
-    Alice->>Server: UDP Datagram (MSG, to="*", text="Hello everyone!")
-    Note right of Server: Parse & decrypt UDP payload
-    Server->>Bob: Forward UDP (MSG, from="alice", text="Hello everyone!")
-    Server->>Charlie: Forward UDP (MSG, from="alice", text="Hello everyone!")
-    Note right of Bob: Bob receives broadcast message
-    Note right of Charlie: Charlie receives broadcast message
+    Alice->>Server: UDP Datagram (ptype=MSG, to="*", text="Hello")
+    Note over Server: Server nhận & kiểm tra quyền
+    Server->>Bob: Forward UDP Datagram (from="alice", text="Hello")
+    Server->>Charlie: Forward UDP Datagram (from="alice", text="Hello")
+```
+b) Sequence Diagram cho Unitcast chat
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Alice as Client Alice
+    participant Server as UDP Server (Port 9001)
+    participant Bob as Client Bob
+    participant Charlie as Client Charlie
 
-    Note over Alice,Charlie: Phase 2: Unicast Chat (Chat riêng qua /to)
-    Alice->>Server: UDP Datagram (MSG, to="bob", text="Hi Bob, secret message")
-    Note right of Server: Lookup 'bob' in UserRegistry for IP & Port
-    Server->>Bob: Forward UDP (MSG, from="alice", text="Hi Bob, secret message")
-    Note right of Charlie: Charlie does NOT receive this message
+    Alice->>Server: UDP Datagram (ptype=MSG, to="bob", text="Hi Bob")
+    Note over Server: Server tra cứu địa chỉ IP:Port của Bob
+    Server->>Bob: Forward UDP Datagram (from="alice", text="Hi Bob")
+    Note over Charlie: Charlie KHÔNG nhận được bản tin này
+```
+c) Sequence Diagram cho Heartbeat 
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client as Client Alice
+    participant Server as UDP Server
+    participant CleanThread as Cleanup Loop (Daemon)
 
-    Note over Alice,Server: Phase 3: Periodic Heartbeat & Liveness
-    loop Every 2 seconds
-        Alice->>Server: UDP Datagram (HEARTBEAT, username="alice")
-        Note right of Server: Update last_seen["alice"] = current_time
+    loop Định kỳ mỗi 2 giây
+        Client->>Server: UDP Datagram (ptype=HEARTBEAT, username="alice")
+        Note over Server: Cập nhật last_seen["alice"] = now()
     end
 
-    Note over Alice: Client Alice drops connection abruptly (Network drop / Crash)
-    
-    rect rgb(240, 240, 240)
-        Note right of Server: Cleanup Loop (Background Daemon Task)
-        Server->>Server: Scan last_seen map (now - last_seen > 10s timeout)
-        Note right of Server: Detect Alice is stale (> 10s without heartbeat)
-        Server->>UserRegistry: unregister("alice")
-        UserRegistry-->>Server: Removed from active users list
-        Server->>Bob: Broadcast updated USER_LIST (Alice offline)
-        Server->>Charlie: Broadcast updated USER_LIST (Alice offline)
+    Note over Client: Client đột ngột sập / ngắt mạng
+    Note over Server: Ngừng nhận HEARTBEAT từ Alice
+
+    loop Quét định kỳ
+        CleanThread->>Server: Kiểm tra timeout (now - last_seen > 10s)
+        Note over Server: Phát hiện Alice quá 10s không heartbeat
+        Server->>Server: registry.unregister("alice")
+        Server->>All: Broadcast USER_LIST cập nhật (Alice offline)
     end
 ```
