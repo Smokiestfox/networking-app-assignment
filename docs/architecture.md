@@ -1,126 +1,209 @@
 # System Architecture – Networking App Assignment
 
-> **Scope:** Week 2 – State Management & Concurrency Implementation (Rubric 3 & 4)
+> **Scope:** Week 3 – UDP Messaging, Heartbeat & Liveness (Rubric 5), built on Week 1-2 (handshake, authentication, concurrency).
+>
+> **Status note:** The Server UDP Engine (routing + liveness monitor) is **not yet merged into `server.py`**. Until it is, `server_demo.py` runs the real TCP server plus a temporary UDP engine (`DemoUdpEngine`) so that `client.py` can be tested end to end. Sections marked **[Planned in server.py]** describe the target design; the demo already implements it in one process.
 
 ---
 
 ## 1. Three-Layer Architecture
 
-The system follows a strict three-tier separation of concerns:
+The system keeps network logic, state/data processing, and the user interface separate:
 
 ```mermaid
 graph TD
     subgraph L3["Layer 3 – Presentation"]
-        UI["Web UI (static/index.html - Week 5)"]
-        CLI["CLI Interactive / Logging (client.py)"]
+        CLI["CLI Chat (client.py): /all /to /list /quit"]
         SIM["Demo Simulator (simulate_demo.py)"]
+        UI["Web UI (Week 5)"]
     end
 
     subgraph L2["Layer 2 – Application & State"]
-        CLIENT["client.py (Session State: IDLE -> LOGGED_IN)"]
-        SERVER["server.py (Multi-threaded TCP Server)"]
-        REG["UserRegistry (Thread-safe Active Users Table)"]
-        AUTH_DB[("users.json (Credentials Database)")]
+        CLIENT["client.py (session state + 3 threads)"]
+        SERVER["server.py: TCP control server (thread-per-client)"]
+        UDPENG["Server UDP Engine: receiver, router, cleanup loop<br/>[Planned in server.py - temporary: server_demo.py]"]
+        REG["UserRegistry (registry.py, thread-safe active users)"]
+        AUTH_DB[("users.json")]
     end
 
     subgraph L1["Layer 1 – Network & Protocol"]
-        PROTO["protocol.py (Frame Header !I + Packet Struct)"]
-        CFG["config.py (SERVER_HOST, TCP_PORT, UDP_PORT)"]
+        PROTO["protocol.py: TCP framing + UDP helpers (build_udp / parse_udp, pack_*, SeqCounter)"]
+        CFG["config.py (ports, HEARTBEAT_INTERVAL, CLIENT_TIMEOUT, Fernet key)"]
     end
 
     CLI --> CLIENT
     SIM --> CLIENT
-    CLIENT <-->|TCP raw socket / Length-Prefix Framing| SERVER
+    UI -.-> CLIENT
+    CLIENT <-->|"TCP 9000: HELLO / AUTH / USER_LIST / BYE"| SERVER
+    CLIENT <-->|"UDP 9001: HEARTBEAT / MSG / USER_LIST"| UDPENG
     SERVER <--> REG
+    UDPENG <--> REG
     REG <--> AUTH_DB
     CLIENT --> PROTO
     SERVER --> PROTO
+    UDPENG --> PROTO
     PROTO --> CFG
 ```
 
+**Dual-channel design**
+
+| Channel     | Port | Purpose                                                        | Framing                                                         |
+| ----------- | :--: | -------------------------------------------------------------- | --------------------------------------------------------------- |
+| TCP control | 9000 | Handshake, login, logout, on-demand user list                  | 4-byte length prefix + JSON                                     |
+| UDP data    | 9001 | Heartbeat, chat messages (broadcast / unicast), user-list push | One packet per datagram: 37-byte header + Fernet-encrypted JSON |
+
+The TCP session is the source of truth for **who is logged in**. The UDP channel only carries real-time traffic for users who are already active in the registry.
+
 ---
 
-## 2. Server Concurrency Architecture (Multi-threading)
+## 2. Server Concurrency Architecture
 
-To handle 10–20+ simultaneous clients without blocking the main event loop (Rubric 4), the Server employs a **thread-per-client model**:
+The server uses a thread-per-client model for TCP and two dedicated daemon threads for UDP:
 
 ```mermaid
 flowchart TD
-    MainThread["Main Thread (CollaborationServer.run)\nsock.accept() loop"]
-    Client1["Client 1\n(alice)"] -->|TCP Connect| MainThread
-    Client2["Client 2\n(bob)"] -->|TCP Connect| MainThread
-    ClientN["Client N\n(user15)"] -->|TCP Connect| MainThread
+    Main["Main Thread<br/>TCP accept() loop (port 9000)"]
+    Main -->|"spawn daemon thread"| T1["TCP worker 1<br/>handle_client(alice)"]
+    Main -->|"spawn daemon thread"| T2["TCP worker 2<br/>handle_client(bob)"]
+    Main -->|"spawn daemon thread"| TN["TCP worker N<br/>handle_client(...)"]
 
-    MainThread -->|spawn thread daemon=True| T1["Worker Thread 1\nhandle_client(conn1, addr1)"]
-    MainThread -->|spawn thread daemon=True| T2["Worker Thread 2\nhandle_client(conn2, addr2)"]
-    MainThread -->|spawn thread daemon=True| TN["Worker Thread N\nhandle_client(connN, addrN)"]
+    RX["udp-recv thread<br/>recvfrom() on port 9001<br/>parse_udp -> HEARTBEAT / MSG"]
+    CL["udp-cleanup thread<br/>cleanup_loop() every 1 s"]
 
-    T1 <-->|atomic with lock| Registry[("UserRegistry\nactive_users: {user: {ip, port, conn}}")]
-    T2 <-->|atomic with lock| Registry
-    TN <-->|atomic with lock| Registry
+    T1 <-->|"registry.lock"| Reg[("UserRegistry<br/>active_users")]
+    T2 <-->|"registry.lock"| Reg
+    TN <-->|"registry.lock"| Reg
+    RX <-->|"is_active()"| Reg
+    CL <-->|"get_active_users() / unregister()"| Reg
+
+    RX <-->|"udp lock"| UState[("UDP state<br/>addrs: user -> (ip, udp_port)<br/>last_seen: user -> time")]
+    CL <-->|"udp lock"| UState
 ```
 
-- **Thread Isolation:** Each client connection is handled by a dedicated worker thread (`threading.Thread(target=self.handle_client, daemon=True)`). A slow or abruptly disconnected client does not block other clients or the server's primary `accept()` listener.
-- **Thread Safety:** All read, write, and mutation operations on the active user registry are synchronized via `threading.Lock()`, completely preventing race conditions during concurrent client logins or logouts.
+- **Thread isolation:** a slow or abruptly closed TCP client only affects its own worker thread.
+- **UDP never blocks TCP:** the UDP receive loop uses a 0.5 s socket timeout so it can stop cleanly, and handles `ConnectionResetError` (Windows reports ICMP "port unreachable" this way) by continuing.
+- **Two locks, two responsibilities:** `registry.lock` protects the active-user table; a separate lock protects the UDP address and `last_seen` maps. Threads never hold both at the same time, which avoids deadlocks.
 
 ---
 
-## 3. Sequence Diagram – Week 2 Authentication & Session Lifecycle
+## 3. Server UDP Engine – Routing & Liveness Monitor **[Planned in server.py]**
 
-Connection, authentication, and session management lifecycle between Client and Server (Rubric 3 & 4):
+### 3.1 Responsibilities
+
+| Component                                     | Behaviour                                                                                                                                                                                                                                            |
+| --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| UDP socket                                    | Bind `SERVER_HOST:UDP_PORT` (9001), run in parallel with the TCP listener inside `server.py`.                                                                                                                                                    |
+| Receive loop                                  | `recvfrom()` -> `parse_udp()`. A datagram that fails validation is logged and ignored, never crashes the server.                                                                                                                                 |
+| `HEARTBEAT` handler                         | Ignore users who are not logged in over TCP (`registry.is_active`). Otherwise store the **source address of the datagram** as the user's UDP address and refresh `last_seen`. The first heartbeat of a user triggers a `USER_LIST` push. |
+| `MSG` handler / `forward(sender, packet)` | Identify the sender from the datagram's source address (the `from` field sent by the client is overwritten with the registered username). Route by `to`.                                                                                         |
+| `cleanup_loop`                              | Every second: remove users whose TCP session has ended, and users with no heartbeat for `CLIENT_TIMEOUT` (10 s). Broadcast the new `USER_LIST` after every removal.                                                                              |
+
+### 3.2 Routing rules
+
+| `to` value                                             | Recipients                                 | Not delivered to                    |
+| -------------------------------------------------------- | ------------------------------------------ | ----------------------------------- |
+| `"*"` (broadcast)                                      | Every user with a known UDP address        | The sender                          |
+| `"<username>"` (unicast)                               | Only that user                             | Everyone else, including the sender |
+| Unknown / offline user, or sender address not registered | Nobody; the datagram is dropped and logged | –                                  |
+
+### 3.3 Heartbeat timeout
+
+When a user is alive over TCP but sends no heartbeat for 10 s, the engine unregisters the user, closes the user's TCP connection (so the TCP worker thread finishes), removes the UDP state, and pushes a new `USER_LIST` to everyone left.
+
+---
+
+## 4. Client Architecture
+
+`client.py` runs the TCP control session on the main thread and two UDP background threads:
+
+```mermaid
+flowchart LR
+    subgraph Client["client.py (run_client)"]
+        Main["Main thread<br/>TCP: HELLO -> AUTH -> BYE<br/>CLI input loop"]
+        HB["heartbeat thread<br/>sends HEARTBEAT every 2 s"]
+        LS["udp-listener thread<br/>prints MSG, join / leave notices"]
+        US(("UDP socket<br/>ephemeral port"))
+    end
+
+    Main -->|"/all, /to: pack_msg + sendto"| US
+    HB -->|"pack_heartbeat + sendto"| US
+    US -->|"recvfrom + parse_udp"| LS
+    US <-->|"UDP 9001"| S["Server UDP Engine"]
+    Main <-->|"TCP 9000"| T["Server TCP"]
+```
+
+| CLI command           | Action                                    | Channel           |
+| --------------------- | ----------------------------------------- | ----------------- |
+| `/all <text>`       | Broadcast (`to = "*"`)                  | UDP               |
+| `/to <user> <text>` | Private message (`to = <user>`)         | UDP               |
+| `/list`             | Request the user list (with IP and port)  | TCP `USER_LIST` |
+| `/quit`             | Stop threads, send `BYE`, close sockets | TCP               |
+
+- The client binds an ephemeral UDP port and sends one `HEARTBEAT` immediately after login, before any chat message, so the server learns its UDP address.
+- Incoming `USER_LIST` datagrams contain only usernames; the listener compares them with the last known set and prints `[+] name is now online` / `[-] name went offline`.
+- Broadcast needs the explicit `/all` command, so a typo cannot message everyone.
+
+---
+
+## 5. Sequence Diagram – Session Lifecycle (TCP + UDP)
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant C as client.py (Chinh)
-    participant S as server.py (Binh)
-    participant R as UserRegistry
+    participant C as client.py
+    participant S as server.py TCP 
+    participant U as Server UDP Engine 
+    participant R as UserRegistry 
 
-    Note over C,S: 1. TCP 3-Way Handshake
-    C->>S: TCP connect (port 9000)
-    S-->>C: Connected
+    Note over C,S: 1. TCP handshake and authentication (port 9000)
+    C->>S: HELLO
+    S-->>C: ACK
+    C->>S: AUTH {username, password}
+    S->>R: authenticate() then register(username, ip, port, conn)
+    S-->>C: AUTH_OK {user, users}
 
-    Note over C,S: 2. Initial Handshake (Week 1 Compatibility)
-    C->>S: HELLO {"type": "HELLO", "client": "alice"}
-    S-->>C: ACK {"type": "ACK", "status": "OK"}
+    Note over C,U: 2. UDP registration (port 9001)
+    C->>U: HEARTBEAT {username}
+    U->>R: is_active(username)
+    U->>U: store source address, last_seen = now
+    U-->>C: USER_LIST {users} (pushed to everyone)
 
-    Note over C,S: 3. Authentication & State Tracking
-    C->>S: AUTH {"type": "AUTH", "username": "alice", "password": "..."}
-    S->>R: authenticate(username, password)
-    R-->>S: OK
-    S->>R: register(username, ip, port, conn)
-    R-->>S: True (Saved in Active Users)
-    S-->>C: AUTH_OK {"type": "AUTH_OK", "user": "alice", "users": [...]}
-
-    Note over C,S: 4. Active Session (State: LOGGED_IN)
-    opt User queries peers
-        C->>S: USER_LIST {"type": "USER_LIST"}
-        S-->>C: USER_LIST {"users": [{"username": "alice", "ip": "...", "port": ...}]}
+    Note over C,U: 3. Chat and liveness
+    loop every 2 s
+        C->>U: HEARTBEAT
     end
+    C->>U: MSG {to: "*" or "bob", text}
+    U-->>C: MSG delivered to recipients only (see section 3.2)
 
-    Note over C,S: 5. Graceful Disconnection
-    C->>S: BYE {"type": "BYE", "username": "alice"}
-    S->>R: unregister("alice")
-    S-->>C: ACK {"type": "ACK", "status": "BYE"}
-    C->>S: Close TCP socket
+    alt Graceful exit
+        C->>S: BYE (TCP)
+        S->>R: unregister(username)
+        U->>U: cleanup_loop sees TCP session ended
+        U-->>C: USER_LIST pushed to the remaining users
+    else Crash / window closed
+        Note over U: no HEARTBEAT for 10 s
+        U->>R: unregister(username), close TCP connection
+        U-->>C: USER_LIST pushed to the remaining users
+    end
 ```
+
+Detailed Broadcast, Unicast and Heartbeat sequence diagrams are maintained in `docs/protocol.md` (Quynh).
 
 ---
 
-## 4. Client State Machine
-
-Client session transitions based on network events:
+## 6. Client State Machine
 
 ```mermaid
 stateDiagram-v2
     [*] --> DISCONNECTED
     DISCONNECTED --> CONNECTING : sock.connect()
-    CONNECTING --> HANDSHAKING : TCP Connected
-    HANDSHAKING --> AUTHENTICATING : Receive ACK for HELLO
-    AUTHENTICATING --> LOGGED_IN : Receive AUTH_OK
-    AUTHENTICATING --> DISCONNECTED : Receive AUTH_FAIL / Wrong credentials
-    LOGGED_IN --> LOGGED_IN : Query USER_LIST / Idle Keep-Alive
-    LOGGED_IN --> DISCONNECTING : Send BYE / KeyboardInterrupt
-    DISCONNECTING --> DISCONNECTED : Receive ACK / Socket closed
+    CONNECTING --> HANDSHAKING : TCP connected
+    HANDSHAKING --> AUTHENTICATING : ACK for HELLO
+    AUTHENTICATING --> LOGGED_IN : AUTH_OK, start UDP threads
+    AUTHENTICATING --> DISCONNECTED : AUTH_FAIL
+    LOGGED_IN --> LOGGED_IN : send / receive MSG, HEARTBEAT, USER_LIST
+    LOGGED_IN --> DISCONNECTING : /quit, Ctrl+C
+    LOGGED_IN --> DISCONNECTED : server closes TCP (heartbeat timeout)
+    DISCONNECTING --> DISCONNECTED : BYE acknowledged, sockets closed
     DISCONNECTED --> [*]
 ```
