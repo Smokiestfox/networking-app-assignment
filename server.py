@@ -80,7 +80,7 @@ class CollaborationServer:
         self.log_file_write(banner)
 
     def get_user_udp_addr(self, username: str):
-        """Lấy địa chỉ UDP (ip, port) của user từ bảng udp_addrs hoặc UserRegistry."""
+        """Chỉ trả về địa chỉ UDP đã biết, không dùng cổng TCP thay thế."""
         with self.udp_addrs_lock:
             if username in self.udp_addrs:
                 return self.udp_addrs[username]
@@ -88,10 +88,9 @@ class CollaborationServer:
         with self.registry.lock:
             info = self.registry.active_users.get(username)
             if info:
-                ip = info.get("ip", "127.0.0.1")
-                port = info.get("udp_port") or info.get("port")
-                if port:
-                    return (ip, int(port))
+                udp_port = info.get("udp_port")
+                if udp_port:
+                    return (info.get("ip", "127.0.0.1"), int(udp_port))
         return None
 
     def forward(self, sender: str, packet) -> list:
@@ -262,9 +261,20 @@ class CollaborationServer:
         while self.running:
             try:
                 data, addr = self.udp_sock.recvfrom(65535)
-            except ConnectionResetError:
-                continue       # Windows: gói trước đó tới cổng đã đóng, bỏ qua
-            except OSError:
+            except ConnectionResetError as e:
+                text = (
+                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+                    f"UDP ConnectionResetError: {e}; continuing recv loop"
+                )
+                print(text, flush=True)
+                self.log_file_write(text)
+                continue
+            except OSError as e:
+                if not self.running:
+                    break
+                text = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] UDP recv OSError: {e}; stopping recv loop"
+                print(text, flush=True)
+                self.log_file_write(text)
                 break
             except Exception as e:
                 if not self.running:
