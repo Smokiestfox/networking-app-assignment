@@ -82,6 +82,8 @@ def _heartbeat_loop(
         try:
             data = pack_heartbeat(username, seq.next())
             udp_sock.sendto(data, server_addr)
+        except ConnectionResetError:
+            pass
         except OSError:
             break
         except Exception as exc:
@@ -105,6 +107,8 @@ def _udp_listener(
         try:
             raw, addr = udp_sock.recvfrom(4096)
         except socket.timeout:
+            continue
+        except ConnectionResetError:
             continue
         except OSError:
             break                      # socket closed externally

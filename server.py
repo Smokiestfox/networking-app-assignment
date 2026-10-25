@@ -262,6 +262,8 @@ class CollaborationServer:
         while self.running:
             try:
                 data, addr = self.udp_sock.recvfrom(65535)
+            except ConnectionResetError:
+                continue       # Windows: gói trước đó tới cổng đã đóng, bỏ qua
             except OSError:
                 break
             except Exception as e:
