@@ -69,10 +69,10 @@ class UserRegistry:
                 return expected_pass == ""
             return False
 
-    def register(self, username: str, ip: str, port: int, conn=None, sock=None):
+    def register(self, username: str, ip: str, port: int, conn=None, sock=None, udp_port: int = None):
         """
         Đăng ký user vào danh sách Active Users một cách ATOMIC.
-        Lưu chính xác IP và active TCP port của client.
+        Lưu chính xác IP và active TCP port của client (kèm udp_port nếu có).
         Nếu user đã online (trùng username), từ chối đăng ký và trả về False.
         """
         connection = conn if conn is not None else sock
@@ -87,6 +87,8 @@ class UserRegistry:
                 "conn": connection,
                 "login_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
+            if udp_port is not None:
+                self.active_users[username]["udp_port"] = int(udp_port)
             return RegisterResult(True, "OK")
 
     def unregister(self, username: str = None, addr: tuple = None) -> bool:
