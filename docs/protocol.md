@@ -33,36 +33,36 @@ Struct format: `!2sBBB II 16s H H I` (Total header size: 37 bytes).
 
 ### 3.1 Header Fields
 
-| Field | Size | Type | Description | Example |
-| --- | ---: | :---: | --- | --- |
-| Magic | 2 bytes | `2s` | Protocol identifier, fixed to `NP` | `b"NP"` |
-| Version | 1 byte | `B` (uint8) | Protocol version | `1` |
-| Type | 1 byte | `B` (uint8) | Packet type identifier | `2` (`MSG`) |
-| Flags | 1 byte | `B` (uint8) | Bitmask control flags | `1` (`FLAG_ENCRYPTED`) |
-| Sequence number | 4 bytes | `I` (uint32) | Monotonically increasing packet sequence number | `1001` |
-| Acknowledgment number | 4 bytes | `I` (uint32) | Sequence number being acknowledged | `1001` |
-| Message ID | 16 bytes | `16s` | Unique UUID v4 for the message or file transfer session | `uuid4().bytes` |
-| Chunk index | 2 bytes | `H` (uint16) | Current chunk sequence (0-indexed) | `0` |
-| Total chunks | 2 bytes | `H` (uint16) | Total number of chunks in the transfer | `1` |
-| Payload length | 4 bytes | `I` (uint32) | Size of payload data following the header (bytes) | `64` |
+| Field                 |     Size |      Type      | Description                                             | Example                    |
+| --------------------- | -------: | :------------: | ------------------------------------------------------- | -------------------------- |
+| Magic                 |  2 bytes |     `2s`     | Protocol identifier, fixed to `NP`                    | `b"NP"`                  |
+| Version               |   1 byte | `B` (uint8) | Protocol version                                        | `1`                      |
+| Type                  |   1 byte | `B` (uint8) | Packet type identifier                                  | `2` (`MSG`)            |
+| Flags                 |   1 byte | `B` (uint8) | Bitmask control flags                                   | `1` (`FLAG_ENCRYPTED`) |
+| Sequence number       |  4 bytes | `I` (uint32) | Monotonically increasing packet sequence number         | `1001`                   |
+| Acknowledgment number |  4 bytes | `I` (uint32) | Sequence number being acknowledged                      | `1001`                   |
+| Message ID            | 16 bytes |    `16s`    | Unique UUID v4 for the message or file transfer session | `uuid4().bytes`          |
+| Chunk index           |  2 bytes | `H` (uint16) | Current chunk sequence (0-indexed)                      | `0`                      |
+| Total chunks          |  2 bytes | `H` (uint16) | Total number of chunks in the transfer                  | `1`                      |
+| Payload length        |  4 bytes | `I` (uint32) | Size of payload data following the header (bytes)       | `64`                     |
 
 ### 3.2 Packet Types
 
-| Value | Name | Description |
-| :---: | --- | --- |
-| 1 | `HEARTBEAT` | Client periodic presence signal (`{"username": "..."}`) |
-| 2 | `MSG` | Real-time chat message (unicast / broadcast) |
-| 3 | `FILE_META` | File transfer metadata (filename, size, checksum) |
-| 4 | `FILE_CHUNK` | Raw binary chunk of a file |
-| 5 | `ACK` | Acknowledgment packet carrying acknowledged sequence number |
-| 6 | `USER_LIST` | Broadcast list of currently active users |
+| Value | Name           | Description                                                 |
+| :---: | -------------- | ----------------------------------------------------------- |
+|   1   | `HEARTBEAT`  | Client periodic presence signal (`{"username": "..."}`)   |
+|   2   | `MSG`        | Real-time chat message (unicast / broadcast)                |
+|   3   | `FILE_META`  | File transfer metadata (filename, size, checksum)           |
+|   4   | `FILE_CHUNK` | Raw binary chunk of a file                                  |
+|   5   | `ACK`        | Acknowledgment packet carrying acknowledged sequence number |
+|   6   | `USER_LIST`  | Broadcast list of currently active users                    |
 
 ### 3.3 Control Flags
 
-| Bit | Name | Value | Description |
-| :---: | --- | :---: | --- |
-| 0 | `FLAG_ENCRYPTED` | `0x01` | Payload is encrypted with Fernet |
-| 1 | `FLAG_END` | `0x02` | Marks final packet / end-of-transmission chunk |
+| Bit | Name               |  Value  | Description                                    |
+| :-: | ------------------ | :------: | ---------------------------------------------- |
+|  0  | `FLAG_ENCRYPTED` | `0x01` | Payload is encrypted with Fernet               |
+|  1  | `FLAG_END`       | `0x02` | Marks final packet / end-of-transmission chunk |
 
 Payloads with `FLAG_ENCRYPTED` set are encrypted using Fernet symmetric encryption before transmission.
 
@@ -73,6 +73,7 @@ Reliable UDP uses sequence numbers, ACKs, retransmission timeouts, and a sliding
 The payload that follows the 37-byte header is a UTF-8 encoded JSON object, unless the packet type says otherwise. `encode_packet()` in `protocol.py` encrypts every non-empty payload with Fernet by default and sets `FLAG_ENCRYPTED`; `decode_packet()` decrypts it automatically. The JSON examples below show the payload **before** encryption. (If the team decides to send Week 3 packets in plaintext for easier debugging, call `encode_packet(..., encrypt=False)` and update this paragraph.)
 
 > **Two different `USER_LIST` messages:**
+>
 > - **TCP control message** (`{"type": "USER_LIST"}` request, `{"type": "USER_LIST", "status": "OK", "users": [...]}` response): the client asks for the list on demand. Each user is `{"username", "ip", "port"}`.
 > - **UDP packet type 6**: pushed by the server to all clients when the set of online users changes. Payload is `{"users": ["alice", "bob"]}` (usernames only).
 
@@ -80,12 +81,12 @@ The payload that follows the 37-byte header is a UTF-8 encoded JSON object, unle
 
 Used for both broadcast and unicast chat messages.
 
-| Field  | Type   | Required | Description                                                  | Example        |
-| ------ | ------ | :------: | ------------------------------------------------------------ | -------------- |
-| `to`   | string |   Yes    | `"*"` for broadcast, otherwise the recipient's username       | `"*"`, `"bob"` |
-| `from` | string |   Yes    | Username of the sender                                       | `"alice"`      |
-| `text` | string |   Yes    | Message content                                              | `"hello"`      |
-| `time` | number |   Yes    | Unix timestamp in seconds, set by the sender                 | `1761300000`   |
+| Field    | Type   | Required | Description                                               | Example            |
+| -------- | ------ | :------: | --------------------------------------------------------- | ------------------ |
+| `to`   | string |   Yes   | `"*"` for broadcast, otherwise the recipient's username | `"*"`, `"bob"` |
+| `from` | string |   Yes   | Username of the sender                                    | `"alice"`        |
+| `text` | string |   Yes   | Message content                                           | `"hello"`        |
+| `time` | number |   Yes   | Unix timestamp in seconds, set by the sender              | `1761300000`     |
 
 ```json
 {"to": "*", "from": "alice", "text": "hello everyone", "time": 1761300000}
@@ -96,6 +97,7 @@ Used for both broadcast and unicast chat messages.
 ```
 
 Routing rules:
+
 - `to = "*"`: the server forwards the message to every online user (see the server plan for whether the sender is excluded).
 - `to = <username>`: the server forwards the message only to that user.
 
@@ -103,9 +105,9 @@ Routing rules:
 
 Sent periodically (every 2 seconds) by an authenticated client. The server updates the user's `last_seen` time. If no heartbeat arrives for 10 seconds, the server removes the user.
 
-| Field      | Type   | Required | Description                         | Example   |
-| ---------- | ------ | :------: | ----------------------------------- | --------- |
-| `username` | string |   Yes    | Username of the client that is alive | `"alice"` |
+| Field        | Type   | Required | Description                          | Example     |
+| ------------ | ------ | :------: | ------------------------------------ | ----------- |
+| `username` | string |   Yes   | Username of the client that is alive | `"alice"` |
 
 ```json
 {"username": "alice"}
@@ -115,9 +117,9 @@ Sent periodically (every 2 seconds) by an authenticated client. The server updat
 
 Sent by the server whenever the set of online users changes (a user logs in, leaves, or is removed by timeout).
 
-| Field   | Type            | Required | Description                      | Example             |
-| ------- | --------------- | :------: | -------------------------------- | ------------------- |
-| `users` | array of string |   Yes    | Usernames of all online users    | `["alice", "bob"]`  |
+| Field     | Type            | Required | Description                   | Example              |
+| --------- | --------------- | :------: | ----------------------------- | -------------------- |
+| `users` | array of string |   Yes   | Usernames of all online users | `["alice", "bob"]` |
 
 ```json
 {"users": ["alice", "bob"]}
@@ -125,13 +127,14 @@ Sent by the server whenever the set of online users changes (a user logs in, lea
 
 ### 3.5 Header Field Values per Packet Type
 
-| Packet type | Flags (set by `encode_packet`) | Sequence number           | Ack number | Message ID        | Chunk index | Total chunks |
-| ----------- | :---: | ------------------------- | :--------: | ----------------- | :---------: | :----------: |
-| `HEARTBEAT` | `FLAG_ENCRYPTED` | increasing per sender     | `0`        | 16 zero bytes     | `0`         | `1`          |
-| `MSG`       | `FLAG_ENCRYPTED` | increasing per sender     | `0`        | `uuid4().bytes`   | `0`         | `1`          |
-| `USER_LIST` | `FLAG_ENCRYPTED` | increasing per server     | `0`        | 16 zero bytes     | `0`         | `1`          |
+| Packet type   | Flags (set by `encode_packet`) | Sequence number       | Ack number | Message ID        | Chunk index | Total chunks |
+| ------------- | :------------------------------: | --------------------- | :--------: | ----------------- | :---------: | :----------: |
+| `HEARTBEAT` |        `FLAG_ENCRYPTED`        | increasing per sender |   `0`   | 16 zero bytes     |    `0`    |    `1`    |
+| `MSG`       |        `FLAG_ENCRYPTED`        | increasing per sender |   `0`   | `uuid4().bytes` |    `0`    |    `1`    |
+| `USER_LIST` |        `FLAG_ENCRYPTED`        | increasing per server |   `0`   | 16 zero bytes     |    `0`    |    `1`    |
 
 Notes:
+
 - The sequence number starts at 1 and increases by 1 for every datagram a sender transmits. It is filled in now so that Week 4 only needs to add ACK handling and retransmission.
 - The ack number stays `0` until the reliability layer is added.
 - Every UDP datagram carries exactly one packet. No length prefix is used on UDP, because the datagram boundary already marks the end of the packet.
@@ -141,13 +144,13 @@ Notes:
 
 Helpers for building and parsing UDP packets. They are thin wrappers around the existing `Packet`, `encode_packet()` and `decode_packet()` in `protocol.py`. The server and the client must use these helpers instead of calling `struct` directly.
 
-| Function                                  | Description                                                                  |
-| ----------------------------------------- | ---------------------------------------------------------------------------- |
-| `pack_udp(ptype, payload, seq, ...)`      | Builds a full datagram: 37-byte header + payload bytes. Returns `bytes`.     |
-| `unpack_udp(data)`                        | Parses a datagram into a header and a payload. Raises an error if the magic number, version, or payload length is invalid. |
-| `pack_msg(to, sender, text, seq)`         | Convenience wrapper that builds a `MSG` packet (adds `time` automatically).  |
-| `pack_heartbeat(username, seq)`           | Convenience wrapper that builds a `HEARTBEAT` packet.                        |
-| `pack_user_list(users, seq)`              | Convenience wrapper that builds a `USER_LIST` packet.                        |
+| Function                               | Description                                                                                                                |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `pack_udp(ptype, payload, seq, ...)` | Builds a full datagram: 37-byte header + payload bytes. Returns `bytes`.                                                 |
+| `unpack_udp(data)`                   | Parses a datagram into a header and a payload. Raises an error if the magic number, version, or payload length is invalid. |
+| `pack_msg(to, sender, text, seq)`    | Convenience wrapper that builds a `MSG` packet (adds `time` automatically).                                            |
+| `pack_heartbeat(username, seq)`      | Convenience wrapper that builds a `HEARTBEAT` packet.                                                                    |
+| `pack_user_list(users, seq)`         | Convenience wrapper that builds a `USER_LIST` packet.                                                                    |
 
 Error handling: a datagram that is too short, has the wrong magic number, or whose declared payload length does not match the received data must be rejected with an error (and ignored by the receiver), never silently accepted.
 
@@ -159,17 +162,17 @@ To ensure clear communication between clients and the server, all application me
 
 ### Message Types Table
 
-| Value / Code | Name | Direction | Transport | Description |
-| :---: | --- | :---: | :---: | --- |
-| - | `HELLO` | Client $\leftrightarrow$ Server | TCP / UDP | Initial handshake signal to establish connection readiness. |
-| 5 | `ACK` | Client $\leftrightarrow$ Server | UDP | Acknowledgment packet carrying confirmation of received segments. |
-| - | `AUTH` | Client $\rightarrow$ Server | TCP / UDP | Authentication payload carrying username and credentials for registration. |
-| 2 | `MSG` | Client $\leftrightarrow$ Server | UDP / TCP | Real-time chat message payload (broadcast or unicast). |
-| 1 | `HEARTBEAT` | Client $\rightarrow$ Server | UDP | Periodic liveness signal to maintain active session presence. |
-| 3 | `FILE_META` | Client $\leftrightarrow$ Server | TCP / UDP | File transfer metadata including filename, size, and total chunks. |
-| 4 | `FILE_CHUNK` | Client $\leftrightarrow$ Server | UDP | Raw binary segment / chunk of an active file transfer. |
-|      6       | `USER_LIST`  |   Server $\rightarrow$ Client   |    UDP    | Broadcast list of currently active users, sent when the user set changes.  |
-| - | `BYE` | Client $\leftrightarrow$ Server | TCP / UDP | Graceful disconnection notice indicating session teardown. |
+| Value / Code | Name           |             Direction             | Transport | Description                                                                |
+| :----------: | -------------- | :-------------------------------: | :-------: | -------------------------------------------------------------------------- |
+|      -      | `HELLO`      | Client $\leftrightarrow$ Server | TCP / UDP | Initial handshake signal to establish connection readiness.                |
+|      5      | `ACK`        | Client $\leftrightarrow$ Server |    UDP    | Acknowledgment packet carrying confirmation of received segments.          |
+|      -      | `AUTH`       |   Client $\rightarrow$ Server   | TCP / UDP | Authentication payload carrying username and credentials for registration. |
+|      2      | `MSG`        | Client $\leftrightarrow$ Server | UDP / TCP | Real-time chat message payload (broadcast or unicast).                     |
+|      1      | `HEARTBEAT`  |   Client $\rightarrow$ Server   |    UDP    | Periodic liveness signal to maintain active session presence.              |
+|      3      | `FILE_META`  | Client $\leftrightarrow$ Server | TCP / UDP | File transfer metadata including filename, size, and total chunks.         |
+|      4      | `FILE_CHUNK` | Client $\leftrightarrow$ Server |    UDP    | Raw binary segment / chunk of an active file transfer.                     |
+|      6      | `USER_LIST`  |   Server $\rightarrow$ Client   |    UDP    | Broadcast list of currently active users, sent when the user set changes.  |
+|      -      | `BYE`        | Client $\leftrightarrow$ Server | TCP / UDP | Graceful disconnection notice indicating session teardown.                 |
 
 ## 5. Connection State Diagram
 
@@ -191,16 +194,18 @@ stateDiagram-v2
 All authentication messages are exchanged over the TCP control channel (port 9000) using length-prefix framing with JSON payloads.
 
 ### 6.1 AUTH Request (Client -> Server)
+
 Sent by the client immediately after the TCP handshake to authenticate and register its active session.
 
-| Field | Type | Required | Description | Example |
-| :--- | :---: | :---: | :--- | :--- |
-| `type` | string | Yes | Message identifier, must be `"AUTH"` | `"AUTH"` |
-| `username` | string | Yes | The user account name | `"alice"` |
-| `password` | string | Yes | The user account password | `"pass123"` |
-| `udp_port` | int | No | The UDP port the client listens on to receive data-channel packets (not the server's port 9001). The server combines it with the client's IP address from `accept()` to know where to send UDP packets. | `50001` |
+| Field        |  Type  | Required | Description                                                                                                                                                                                               | Example       |
+| :----------- | :----: | :------: | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :------------ |
+| `type`     | string |   Yes   | Message identifier, must be `"AUTH"`                                                                                                                                                                    | `"AUTH"`    |
+| `username` | string |   Yes   | The user account name                                                                                                                                                                                     | `"alice"`   |
+| `password` | string |   Yes   | The user account password                                                                                                                                                                                 | `"pass123"` |
+| `udp_port` |  int  |    No    | The UDP port the client listens on to receive data-channel packets (not the server's port 9001). The server combines it with the client's IP address from `accept()` to know where to send UDP packets. | `50001`     |
 
 **Example payload:**
+
 ```json
 {
   "type": "AUTH",
@@ -211,17 +216,19 @@ Sent by the client immediately after the TCP handshake to authenticate and regis
 ```
 
 ### 6.2 AUTH_OK Response (Server -> Client)
+
 Sent by the server when credentials are valid and the user is not currently logged in.
 
-| Field       | Type            | Required | Description                                                        | Example                                  |
-| ----------- | --------------- | :------: | ------------------------------------------------------------------ | ---------------------------------------- |
-| `type`      | string          |   Yes    | Must be `"AUTH_OK"`                                                | `"AUTH_OK"`                              |
-| `status`    | string          |   Yes    | Always `"OK"`                                                      | `"OK"`                                   |
-| `user`      | string          |   Yes    | The authenticated username                                         | `"alice"`                                |
-| `users`     | array of object |   Yes    | Currently online users, each `{"username", "ip", "port"}`          | `[{"username":"bob","ip":"127.0.0.1","port":52134}]` |
-| `user_list` | array of object |    No    | Duplicate of `users` kept for compatibility                        | same as `users`                          |
+| Field         | Type            | Required | Description                                                 | Example                                                |
+| ------------- | --------------- | :------: | ----------------------------------------------------------- | ------------------------------------------------------ |
+| `type`      | string          |   Yes   | Must be `"AUTH_OK"`                                       | `"AUTH_OK"`                                          |
+| `status`    | string          |   Yes   | Always `"OK"`                                             | `"OK"`                                               |
+| `user`      | string          |   Yes   | The authenticated username                                  | `"alice"`                                            |
+| `users`     | array of object |   Yes   | Currently online users, each `{"username", "ip", "port"}` | `[{"username":"bob","ip":"127.0.0.1","port":52134}]` |
+| `user_list` | array of object |    No    | Duplicate of `users` kept for compatibility               | same as `users`                                      |
 
 **Example payload:**
+
 ```json
 {
   "type": "AUTH_OK",
@@ -233,15 +240,17 @@ Sent by the server when credentials are valid and the user is not currently logg
 ```
 
 ### 6.3 AUTH_FAIL Response (Server -> Client)
+
 Sent by the server when authentication is rejected.
 
-| Field     | Type   | Required | Description                                                                    | Example                                  |
-| --------- | ------ | :------: | ------------------------------------------------------------------------------ | ---------------------------------------- |
-| `type`    | string |   Yes    | Must be `"AUTH_FAIL"`                                                          | `"AUTH_FAIL"`                            |
-| `status`  | string |   Yes    | Always `"ERROR"`                                                               | `"ERROR"`                                |
-| `message` | string |   Yes    | Human-readable cause: invalid username/password, or user already logged in     | `"User 'alice' already logged in"`       |
+| Field       | Type   | Required | Description                                                                | Example                              |
+| ----------- | ------ | :------: | -------------------------------------------------------------------------- | ------------------------------------ |
+| `type`    | string |   Yes   | Must be `"AUTH_FAIL"`                                                    | `"AUTH_FAIL"`                      |
+| `status`  | string |   Yes   | Always `"ERROR"`                                                         | `"ERROR"`                          |
+| `message` | string |   Yes   | Human-readable cause: invalid username/password, or user already logged in | `"User 'alice' already logged in"` |
 
 **Example payload:**
+
 ```json
 {
   "type": "AUTH_FAIL",
@@ -262,7 +271,7 @@ sequenceDiagram
     Client->>Server: TCP connect
     Server->>Client: {"type": "ACK", "status": "OK"} (Handshake)
     Client->>Server: {"type": "AUTH", "username": "alice", "password": "pass123"}
-    
+  
     Server->>Registry: authenticate("alice", "pass123")
     alt Credentials Invalid
         Server->>Client: {"type": "AUTH_FAIL", "status": "ERROR", "message": "Authentication failed: invalid username or password"}
@@ -302,6 +311,91 @@ sequenceDiagram
     ClientB-->>Server: ACK
 ```
 
+### 8.1 Tổng quan quy trình truyền file
+Quy trình truyền file qua UDP giữa Client gửi (FileSender) và Client nhận (FileReceiver) thông qua Server relay:
+1. **Khởi tạo phiên (`FILE_META`)**: FileSender gửi gói tin `FILE_META` mang thông tin tên file, kích thước, tổng số chunk và mã băm SHA-256. Server chuyển tiếp bản tin này đến người nhận và tạo phiên quản lý (`msg_id`). Phía nhận chuẩn bị bộ nhớ đệm và phản hồi `ACK`.
+2. **Truyền dữ liệu nhị phân (`FILE_CHUNK`)**: FileSender chia nhỏ file thành các mảnh nhị phân (~700 bytes/mảnh), đánh số thứ tự từ `0` đến `total - 1`, gửi theo cửa sổ trượt (Sliding Window / CUBIC).
+3. **Phản hồi xác nhận (`ACK`)**: FileReceiver nhận từng mảnh, lưu vào bộ đệm và lập tức gửi gói tin `ACK` xác nhận số thứ tự của mảnh đó.
+4. **Kết thúc và kiểm tra toàn vẹn**: Mảnh cuối cùng có cờ `FLAG_END = 0x02`. Khi nhận đủ 100% các mảnh, FileReceiver ghép file, tính mã SHA-256 và so khớp với `checksum` ban đầu.
+
+---
+
+### 8.2 Đặc tả gói tin FILE_META (Packet type = 3)
+Gói tin khởi tạo phiên truyền file. Header mang `ptype = 3`, `msg_id` phiên, và `total` là tổng số chunk. Payload là chuỗi JSON chứa metadata của file.
+
+| Trường | Kiểu dữ liệu | Bắt buộc | Mô tả | Ví dụ |
+| :--- | :---: | :---: | :--- | :--- |
+| `to` | string | Có | Tên người nhận (username) hoặc `"*"` nếu gửi broadcast | `"bob"` |
+| `from` | string | Có | Tên người gửi (username) | `"alice"` |
+| `filename` | string | Có | Tên file gốc (không bao gồm đường dẫn tuyệt đối) | `"report.pdf"` |
+| `size` | int | Có | Kích thước file tính bằng byte | `1048576` |
+| `chunks` | int | Có | Tổng số mảnh được chia nhỏ | `1500` |
+| `checksum` | string | Có | Chuỗi băm SHA-256 (64 ký tự hex) của toàn bộ file gốc | `"e3b0c44298fc1c149afbf4c8..."` |
+
+**Ví dụ Payload JSON:**
+```json
+{
+  "to": "bob",
+  "from": "alice",
+  "filename": "report.pdf",
+  "size": 1048576,
+  "chunks": 1500,
+  "checksum": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}
+```
+
+---
+
+### 8.3 Đặc tả gói tin FILE_CHUNK (Packet type = 4)
+Gói tin mang một mảnh dữ liệu nhị phân thô của file.
+- **Header:**
+  - `ptype = 4` (`FILE_CHUNK`).
+  - `msg_id`: UUID phiên truyền file (khớp với `msg_id` trong `FILE_META`).
+  - `seq`: Số thứ tự sequence của gói tin UDP.
+  - `chunk`: Chỉ số của mảnh dữ liệu hiện tại (chỉ số 0-indexed: `0, 1, 2, ..., total - 1`).
+  - `total`: Tổng số mảnh của file (`chunks`).
+  - `flags`:
+    - `0x01` (`FLAG_ENCRYPTED`): Payload được mã hóa với Fernet.
+    - `0x02` (`FLAG_END`): Tự động bật khi `chunk == total - 1` để đánh dấu mảnh cuối cùng của phiên.
+- **Payload:**
+  - **Dữ liệu nhị phân trực tiếp (Raw Bytes)** của file, kích thước chuẩn khoảng 700 bytes để sau khi mã hóa Fernet vẫn nằm trong giới hạn an toàn `MAX_UDP_SIZE = 1400` bytes (tránh phân mảnh IP). Không parse JSON.
+
+---
+
+### 8.4 Đặc tả gói tin ACK (Packet type = 5)
+Gói tin phản hồi xác nhận bên nhận đã nhận thành công một gói tin (bản tin chat, metadata hoặc mảnh file).
+- **Header:**
+  - `ptype = 5` (`ACK`).
+  - `ack`: Số thứ tự sequence của gói tin được xác nhận (`ack_seq`).
+  - `msg_id`: UUID phiên làm việc (nếu xác nhận mảnh file).
+  - `chunk`: Chỉ số mảnh (`chunk index`) đang được xác nhận.
+- **Payload:** Rỗng (`b""`, độ dài 0 byte). Mọi thông tin xác nhận đều nằm trong header 37 byte.
+
+---
+
+### 8.5 Cơ chế phát hiện và xử lý lỗi (Reliability & Error Handling)
+
+1. **Mất gói và gửi lại (Packet Loss & Retransmission):**
+   - Phía gửi (`FileSender`) duy trì bộ đếm thời gian RTO thích ứng (RFC 6298).
+   - Nếu một mảnh gửi đi quá thời gian RTO mà chưa nhận được gói `ACK` tương ứng, sender coi như mảnh đó bị mất và tự động gửi lại (retransmit).
+
+2. **Nhận lệch thứ tự (Out-of-order Delivery):**
+   - Do đặc tính của UDP, các gói `FILE_CHUNK` có thể đến lệch thứ tự (ví dụ chunk 2 đến trước chunk 1).
+   - `FileReceiver` lưu các mảnh vào một từ điển đệm (buffer) theo `chunk index`. Receiver chỉ bắt đầu ghép file khi đã thu thập đủ 100% các mảnh từ `0` đến `total - 1`.
+
+3. **Gói tin trùng lặp (Duplicate Packets):**
+   - Nếu gói tin `ACK` bị mất hoặc mạng bị trễ khiến bên gửi truyền lại mảnh mà bên nhận đã có:
+   - `FileReceiver` kiểm tra `chunk index`, nếu đã có trong bộ đệm thì bỏ qua không ghi đè, **nhưng vẫn gửi lại gói `ACK`** tương ứng để phía gửi biết và trượt cửa sổ gửi tiếp.
+
+4. **Kiểm tra tính toàn vẹn (Integrity Verification & Corrupted File):**
+   - Sau khi nhận đủ tất cả các mảnh, `FileReceiver` ghép toàn bộ các mảnh nhị phân lại thành nội dung file hoàn chỉnh theo đúng thứ tự từ 0 đến `total - 1`.
+   - Tính toán mã băm SHA-256 trên nội dung vừa ghép:
+     - **Nếu SHA-256 khớp với `checksum` trong `FILE_META`**: File hợp lệ 100%, ghi file vào thư mục lưu trữ `downloads/` và thông báo hoàn tất.
+     - **Nếu SHA-256 không khớp**: File bị lỗi hoặc hỏng trong quá trình truyền. Receiver hủy toàn bộ dữ liệu tạm của file đó, ghi log báo lỗi và không lưu file hỏng vào ổ đĩa.
+
+5. **Hủy phiên do quá hạn (Session Timeout):**
+   - Nếu trong vòng **30 giây** mà không có bất kỳ gói tin mới nào đến cho một phiên truyền file (`msg_id`), cả Server, FileSender và FileReceiver sẽ tự động hủy phiên và giải phóng tài nguyên bộ nhớ đệm để tránh rò rỉ bộ nhớ (memory leak).
+   
 ## 9. Connection Sequence Diagram (Handshake -> Auth -> Disconnect)
 
 Sơ đồ trình tự (Sequence Diagram) mô tả toàn bộ vòng đời kết nối từ lúc Client thiết lập TCP, gửi bản tin `HELLO`, thực hiện xác thực `AUTH`, duy trì phiên và ngắt kết nối an toàn (`BYE` hoặc ngắt đột ngột):
@@ -352,7 +446,9 @@ sequenceDiagram
 ```
 
 ## 10. Sequence Diagram cho Broadcast, Unicast và Heartbeat
+
 a) Sequence Diagram cho Broadcast chat
+
 ```mermaid
 sequenceDiagram
     autonumber
@@ -366,7 +462,9 @@ sequenceDiagram
     Server->>Bob: Forward UDP Datagram (from="alice", text="Hello")
     Server->>Charlie: Forward UDP Datagram (from="alice", text="Hello")
 ```
+
 b) Sequence Diagram cho Unicast chat
+
 ```mermaid
 sequenceDiagram
     autonumber
@@ -380,7 +478,9 @@ sequenceDiagram
     Server->>Bob: Forward UDP Datagram (from="alice", text="Hi Bob")
     Note over Charlie: Charlie KHÔNG nhận được bản tin này
 ```
-c) Sequence Diagram cho Heartbeat 
+
+c) Sequence Diagram cho Heartbeat
+
 ```mermaid
 sequenceDiagram
     autonumber
