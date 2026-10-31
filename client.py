@@ -1,4 +1,4 @@
-# client.py – Chat client (Week 3: UDP Messaging, Heartbeat & CLI Interface)
+# client.py – Week 4: UDP chat, heartbeat and reliable unicast file transfer
 # Responsibilities:
 #   1. TCP control channel: HELLO handshake -> AUTH -> USER_LIST -> BYE
 #   2. UDP data channel:    send HEARTBEAT every HEARTBEAT_INTERVAL seconds (background thread)
@@ -6,13 +6,19 @@
 #   3. Interactive CLI:     /all <text>       – broadcast to everyone
 #                           /to <user> <text> – unicast to a specific user
 #                           /list             – request & display current user list
+#                           /send <user> <file> – reliable file transfer in background
 #                           /quit             – graceful logout
 
 import socket
-import sys
+import argparse
 import logging
 import threading
 import time
+import os
+import queue
+from pathlib import Path
+
+from file_transfers import FileTransfers, loss_rate_from_env
 
 from config import SERVER_HOST, TCP_PORT, UDP_PORT, HEARTBEAT_INTERVAL
 from protocol import (
@@ -24,6 +30,9 @@ from protocol import (
     SeqCounter,
     MSG,
     USER_LIST,
+    FILE_META,
+    FILE_CHUNK,
+    ACK,
 )
 
 # Logging configuration
@@ -97,6 +106,8 @@ def _udp_listener(
     known: set,
     known_lock: threading.Lock,
     stats: dict = None,
+    transfers=None,
+    server_addr=None,
 ) -> None:
     """Listen for incoming UDP datagrams and print them to the console."""
     log.info("[%s] UDP listener thread started.", username)
@@ -108,6 +119,9 @@ def _udp_listener(
             continue
         except OSError:
             break                      # socket closed externally
+
+        if server_addr is not None and addr != server_addr:
+            continue
 
         try:
             pkt, body = parse_udp(raw)
@@ -122,6 +136,8 @@ def _udp_listener(
             ts       = time.strftime("%H:%M:%S", time.localtime(body.get("time", time.time())))
             if stats is not None:
                 stats["received"] = stats.get("received", 0) + 1
+                if transfers and transfers.active_evt.is_set():
+                    stats["messages_during_file"] = stats.get("messages_during_file", 0) + 1
             if receiver == "*":
                 print(f"\n  [{ts}] [BROADCAST] {sender}: {text}")
             else:
@@ -142,8 +158,15 @@ def _udp_listener(
                 print(f"  [+] {name} is now online")
             for name in sorted(left):
                 print(f"  [-] {name} went offline")
+                if transfers:
+                    transfers.peer_left(name)
             print(f"  Online ({len(online)}): {', '.join(sorted(online))}")
             print(f"{username}> ", end="", flush=True)
+
+        elif pkt.ptype in (FILE_META, FILE_CHUNK, ACK) and transfers:
+            if stats is not None and pkt.ptype in (FILE_META, FILE_CHUNK):
+                stats["file_packets_received"] = stats.get("file_packets_received", 0) + 1
+            transfers.on_packet(pkt, body)
 
     log.info("[%s] UDP listener thread stopped.", username)
 
@@ -163,6 +186,14 @@ def run_client(
     send_messages: list = None,   # list of (to, text) tuples for automated testing
     send_delay: float = 0.3,      # timed mode: seconds to wait after login before sending send_messages
     stats: dict = None,           # optional: filled with {"received": <number of MSG packets received>}
+    send_files: list = None,      # automated mode: [(recipient, path)]
+    download_dir=None,
+    simulate_loss=None,
+    loss_seed=None,
+    ready_evt=None,
+    session_stop=None,
+    graceful_shutdown=True,      # False simulates closing a process without BYE in demos
+    demo_receiver=False,         # explicit opt-in; never replace Hau's production module silently
 ) -> bool:
     """
     Run the full chat client lifecycle:
@@ -193,8 +224,16 @@ def run_client(
         else:
             password = ""
 
+    try:
+        loss_rate = loss_rate_from_env(os.environ.get("SIMULATE_LOSS", "0")
+                                       if simulate_loss is None else simulate_loss)
+    except ValueError as exc:
+        log.error("%s", exc)
+        return False
+
     if host is None:
         host = _resolve_host(SERVER_HOST)
+    host = socket.gethostbyname(host)
 
     log.info("[%s] Connecting to TCP server at %s:%d ...", username, host, port)
 
@@ -202,6 +241,7 @@ def run_client(
     # 1. TCP connection + handshake
     # ------------------------------------------------------------------
     tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    tcp_sock.settimeout(5.0)
     try:
         tcp_sock.connect((host, port))
         log.info("[%s] TCP connected.", username)
@@ -263,6 +303,11 @@ def run_client(
     stop_evt = threading.Event()
     known_users = _names(active_users)          # who is online right now (for join/leave notices)
     known_lock = threading.Lock()
+    transfers = FileTransfers(
+        username, lambda raw: udp_sock.sendto(raw, server_udp_addr), seq,
+        download_dir if download_dir is not None else Path("downloads") / username,
+        loss_rate=loss_rate, stats=stats, seed=loss_seed, demo_receiver=demo_receiver,
+    )
 
     hb_thread = threading.Thread(
         target=_heartbeat_loop,
@@ -272,7 +317,7 @@ def run_client(
     )
     listener_thread = threading.Thread(
         target=_udp_listener,
-        args=(udp_sock, username, stop_evt, known_users, known_lock, stats),
+        args=(udp_sock, username, stop_evt, known_users, known_lock, stats, transfers, server_udp_addr),
         daemon=True,
         name=f"listener-{username}",
     )
@@ -283,6 +328,8 @@ def run_client(
         log.warning("[%s] Initial heartbeat failed: %s", username, exc)
     hb_thread.start()
     listener_thread.start()
+    if ready_evt is not None:
+        ready_evt.set()
 
     # ------------------------------------------------------------------
     # 4. Session loop
@@ -291,10 +338,14 @@ def run_client(
         if duration > 0:
             # Timed hold mode – simulation / automated tests
             log.info("[%s] Timed mode: holding session for %.1f seconds.", username, duration)
-            if send_messages:
+            if send_messages or send_files:
                 # Wait so the server has registered our UDP address (and, in demos, everyone is online)
-                time.sleep(send_delay)
-                for to, text in send_messages:
+                stop_evt.wait(send_delay)
+                for to, path in send_files or []:
+                    transfers.send_file(to, path)
+                for to, text in send_messages or []:
+                    if session_stop is not None and session_stop.is_set():
+                        break
                     try:
                         data = pack_msg(to, username, text, seq.next())
                         udp_sock.sendto(data, server_udp_addr)
@@ -303,12 +354,18 @@ def run_client(
                         time.sleep(0.1)
                     except Exception as exc:
                         log.warning("[%s] Failed to send message: %s", username, exc)
-            time.sleep(duration)
+            deadline = time.monotonic() + duration
+            while time.monotonic() < deadline:
+                if session_stop is not None and session_stop.is_set():
+                    break
+                stop_evt.wait(0.1)
 
         elif not interactive:
             # Headless background hold
             while not stop_evt.is_set():
-                time.sleep(1)
+                if session_stop is not None and session_stop.is_set():
+                    break
+                stop_evt.wait(0.1)
 
         else:
             # ----------------------------------------------------------------
@@ -318,6 +375,7 @@ def run_client(
             print("  /all <text>         - broadcast message to everyone")
             print("  /to <user> <text>   - send private message to <user>")
             print("  /list               - refresh the active user list")
+            print("  /send <user> <file> - send file (spaces in path allowed)")
             print("  /quit               - log out and exit\n")
 
             while True:
@@ -378,26 +436,42 @@ def run_client(
                     except Exception as exc:
                         log.warning("[%s] Failed to send unicast: %s", username, exc)
 
+                elif raw_cmd.lower() == "/send" or raw_cmd.lower().startswith("/send "):
+                    parts = raw_cmd[5:].strip().split(maxsplit=1)
+                    if len(parts) != 2:
+                        print("  Usage: /send <username> <file path>")
+                        continue
+                    to_user, path = parts
+                    path = path.strip().strip('"')
+                    try:
+                        transfers.send_file(to_user, path)
+                    except (ValueError, queue.Full) as exc:
+                        print(f"  Error: {exc}")
+
                 else:
-                    print("  Unknown command. Use /all <text>, /to <user> <text>, /list, or /quit.")
+                    print("  Unknown command. Use /all, /to, /send, /list, or /quit.")
 
     except KeyboardInterrupt:
         print()
+    except (OSError, ValueError) as exc:
+        log.error("[%s] Session error: %s", username, exc)
 
     # ------------------------------------------------------------------
     # 5. Graceful shutdown
     # ------------------------------------------------------------------
     log.info("[%s] Logging out ...", username)
     stop_evt.set()
+    transfers.close()
     try:
         udp_sock.close()
     except OSError:
         pass
-    try:
-        send_json_frame(tcp_sock, {"type": "BYE", "username": username})
-        recv_json_frame(tcp_sock)
-    except Exception:
-        pass
+    if graceful_shutdown:
+        try:
+            send_json_frame(tcp_sock, {"type": "BYE", "username": username})
+            recv_json_frame(tcp_sock)
+        except Exception:
+            pass
     try:
         tcp_sock.close()
     except OSError:
@@ -408,12 +482,18 @@ def run_client(
     return True
 
 
-if __name__ == "__main__":
-    # Usage: python client.py [username] [password] [host] [port]
-    # If no arguments provided, run_client() will prompt interactively.
-    uname       = sys.argv[1].strip() if len(sys.argv) > 1 and sys.argv[1].strip() else None
-    upass       = sys.argv[2].strip() if len(sys.argv) > 2 else None
-    target_host = sys.argv[3].strip() if len(sys.argv) > 3 else None
-    target_port = int(sys.argv[4].strip()) if len(sys.argv) > 4 else TCP_PORT
+def parse_cli_args(argv=None):
+    parser = argparse.ArgumentParser(description="TCP/UDP collaboration client")
+    parser.add_argument("username", nargs="?")
+    parser.add_argument("password", nargs="?")
+    parser.add_argument("host", nargs="?")
+    parser.add_argument("port", nargs="?", type=int, default=TCP_PORT)
+    parser.add_argument("--demo-receiver", action="store_true",
+                        help="Use reference file_receiver_demo.py for development tests")
+    return parser.parse_args(argv)
 
-    run_client(username=uname, password=upass, host=target_host, port=target_port)
+
+if __name__ == "__main__":
+    args = parse_cli_args()
+    run_client(username=args.username, password=args.password, host=args.host, port=args.port,
+               demo_receiver=args.demo_receiver)
