@@ -29,6 +29,7 @@ REQUIRED_KEYS = {
     MSG: ("to", "from", "text", "time"),
     HEARTBEAT: ("username",),
     USER_LIST: ("users",),
+    FILE_META: ("to", "from", "filename", "size", "chunks", "checksum"), # chunks: tổng số mảnh được cắt ra để gửi, checksum: dùng để ktra tính nguyên vẹn sau khi ghép lại
 }
  
 
@@ -178,16 +179,23 @@ def parse_udp(data: bytes):
         raise ValueError("payload length does not match datagram size")
     try:
         packet = decode_packet(data)                       # also decrypts if FLAG_ENCRYPTED
-        body = json_obj(packet.payload) if packet.payload else {}
+        
+        if packet.ptype == FILE_CHUNK: # nếu là FILE_CHUNK: payload là dữ liệu nhị phân (bytes), không parse JSON
+            body = packet.payload
+        else:
+            body = json_obj(packet.payload) if packet.payload else {}
     except ValueError:
         raise
     except Exception as exc:                               # InvalidToken, UnicodeDecodeError, ...
         raise ValueError(f"invalid payload: {exc}") from exc
-    if not isinstance(body, dict):
-        raise ValueError("payload must be a JSON object")
-    missing = [k for k in REQUIRED_KEYS.get(packet.ptype, ()) if k not in body]
-    if missing:
-        raise ValueError(f"missing fields {missing} in packet type {packet.ptype}")
+
+    if packet.ptype != FILE_CHUNK:
+        if not isinstance(body, dict):
+            raise ValueError("payload must be a JSON object")
+        missing = [k for k in REQUIRED_KEYS.get(packet.ptype, ()) if k not in body]
+        if missing:
+            raise ValueError(f"missing fields {missing} in packet type {packet.ptype}")
+
     return packet, body
  
  
@@ -207,4 +215,63 @@ def pack_heartbeat(username: str, seq: int, **kwargs) -> bytes:
 def pack_user_list(users, seq: int, **kwargs) -> bytes:
     """USER_LIST: list of online usernames (server -> clients)."""
     return build_udp(USER_LIST, {"users": list(users)}, seq, **kwargs)
- 
+
+def pack_file_meta(to: str, sender: str, filename: str, size: int, chunks: int, checksum: str, seq: int, msg_id: uuid.UUID = None, **kwargs) -> bytes:
+    if msg_id is None:
+        msg_id = new_id()
+
+    body = {
+        "to": to,
+        "from": sender,
+        "filename": filename,
+        "size": size,
+        "chunks": chunks,
+        "checksum": checksum,
+    }
+
+    packet = Packet(
+        ptype = FILE_META,
+        seq = seq,
+        msg_id = msg_id,
+        chunk = 0,
+        total = chunks,
+        payload = json.dumps(body, separators = (",", ":"), ensure_ascii = False).encode("utf-8"),
+    )
+    encrypt = kwargs.get("encrypt", True)
+    data = encode_packet(packet, encrypt = encrypt)
+    if len(data) > MAX_UDP_SIZE:
+        raise ValueError(f"datagram too large: {len(data)} > {MAX_UDP_SIZE} bytes")
+    return data
+
+def pack_file_chunk(msg_id: uuid.UUID, chunk: int, total: int, data: bytes, seq: int, flags: int = 0, **kwargs) -> bytes:
+    if chunk == total - 1:
+        flags = flags | FLAG_END
+
+    packet = Packet(
+        ptype = FILE_CHUNK,
+        seq = seq,
+        msg_id = msg_id,
+        chunk = chunk,
+        total = total,
+        flags = flags,
+        payload = data, #payload ở đây là bytes nhị phân trực tiếp của file
+    )
+    encrypt = kwargs.get("encrypt", True)
+    data_packet = encode_packet(packet, encrypt = encrypt)
+    if len(data_packet) > MAX_UDP_SIZE:
+        raise ValueError(f"datagram too large: {len(data_packet)} > {MAX_UDP_SIZE} bytes")
+    return data_packet
+
+def pack_ack(ack_seq: int, seq: int = 0, msg_id: uuid.UUID = None, chunk: int = 0, **kwargs) -> bytes:
+    packet = Packet(
+        ptype = ACK,
+        seq = seq,
+        msg_id = msg_id if msg_id is not None else NIL_ID,
+        ack = ack_seq, # số sequence của gói tin dc xác nhận
+        chunk = chunk, # chỉ số chunk tương ứng (nếu đang truyền file)
+        total = 1,
+        flags = 0,
+        payload = b"", # gói tin ACK chỉ cần phần header, payload để rỗng
+    )
+    encrypt = kwargs.get("encrypt", False)
+    return encode_packet(packet, encrypt = encrypt)
