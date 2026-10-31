@@ -146,11 +146,14 @@ Helpers for building and parsing UDP packets. They are thin wrappers around the 
 
 | Function                               | Description                                                                                                                |
 | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `pack_udp(ptype, payload, seq, ...)` | Builds a full datagram: 37-byte header + payload bytes. Returns `bytes`.                                                 |
-| `unpack_udp(data)`                   | Parses a datagram into a header and a payload. Raises an error if the magic number, version, or payload length is invalid. |
+| `build_udp(ptype, body, seq, ...)` | Builds a full datagram: 37-byte header + payload bytes. Returns `bytes`.                                                 |
+| `parse_udp(data)`                    | Parses a datagram into a `Packet` and a body (dict, or raw bytes for `FILE_CHUNK`). Raises an error if the magic number, version, or payload length is invalid. |
 | `pack_msg(to, sender, text, seq)`    | Convenience wrapper that builds a `MSG` packet (adds `time` automatically).                                            |
 | `pack_heartbeat(username, seq)`      | Convenience wrapper that builds a `HEARTBEAT` packet.                                                                    |
 | `pack_user_list(users, seq)`         | Convenience wrapper that builds a `USER_LIST` packet.                                                                    |
+| `pack_file_meta(to, sender, ...)`    | Builds a `FILE_META` packet (`ptype=3`, JSON metadata, `total=chunks`).                                                  |
+| `pack_file_chunk(msg_id, chunk, ...)`| Builds a `FILE_CHUNK` packet (`ptype=4`, raw binary payload, sets `FLAG_END` on final chunk).                            |
+| `pack_ack(ack_seq, seq, msg_id, ...)`| Builds an `ACK` packet (`ptype=5`, empty payload, header carries `ack`, `msg_id`, `chunk`).                              |
 
 Error handling: a datagram that is too short, has the wrong magic number, or whose declared payload length does not match the received data must be rejected with an error (and ignored by the receiver), never silently accepted.
 
@@ -290,26 +293,29 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     ClientA->>Server: UDP MSG(seq)
-    Server-->>ClientA: ACK(seq)
-    Server->>ClientB: UDP MSG(new seq)
-    ClientB-->>Server: ACK(new seq)
+    Server->>ClientB: UDP MSG(from = A)
 ```
 
-> **Note (Week 3):** In this version, `MSG` and `HEARTBEAT` are sent over plain UDP without ACK or retransmission, so a lost datagram is not recovered. The ACK and retransmission shown above will be added in Week 4 together with the sliding window. The sequence diagrams for broadcast, unicast, and heartbeat are added by the testing/diagram owner.
+> **Note:** `MSG` and `HEARTBEAT` are sent over plain UDP without ACK or retransmission, so a lost datagram is not recovered. Only file transfer (section 8) has reliability, using end-to-end ACKs. The sequence diagrams for broadcast, unicast, and heartbeat are in section 10.
 
 ## 8. File Flow
 
 ```mermaid
 sequenceDiagram
-    ClientA->>Server: FILE_META
-    Server-->>ClientA: ACK
-    loop sliding window
-        ClientA->>Server: FILE_CHUNK
-        Server-->>ClientA: ACK
-    end
-    Server->>ClientB: FILE_CHUNK
+    ClientA->>Server: FILE_META (to = B)
+    Note over Server: kiểm tra B online, tạo phiên msg_id -> (A, B)
+    Server->>ClientB: FILE_META (from = A)
     ClientB-->>Server: ACK
+    Server-->>ClientA: ACK (relay)
+    loop sliding window (CUBIC cwnd)
+        ClientA->>Server: FILE_CHUNK
+        Server->>ClientB: FILE_CHUNK (relay, không lưu)
+        ClientB-->>Server: ACK
+        Server-->>ClientA: ACK (relay)
+    end
 ```
+
+ACK là **đầu-cuối**: do FileReceiver (B) tạo, server chỉ chuyển tiếp theo bảng phiên; cửa sổ trượt và timer nằm hoàn toàn ở FileSender (A).
 
 ### 8.1 Tổng quan quy trình truyền file
 Quy trình truyền file qua UDP giữa Client gửi (FileSender) và Client nhận (FileReceiver) thông qua Server relay:
@@ -325,7 +331,7 @@ Gói tin khởi tạo phiên truyền file. Header mang `ptype = 3`, `msg_id` ph
 
 | Trường | Kiểu dữ liệu | Bắt buộc | Mô tả | Ví dụ |
 | :--- | :---: | :---: | :--- | :--- |
-| `to` | string | Có | Tên người nhận (username) hoặc `"*"` nếu gửi broadcast | `"bob"` |
+| `to` | string | Có | Tên người nhận (username) hoặc `"*"` nếu gửi broadcast (server chuyển cho mọi user đang online trừ người gửi) | `"bob"` |
 | `from` | string | Có | Tên người gửi (username) | `"alice"` |
 | `filename` | string | Có | Tên file gốc (không bao gồm đường dẫn tuyệt đối) | `"report.pdf"` |
 | `size` | int | Có | Kích thước file tính bằng byte | `1048576` |
@@ -376,26 +382,64 @@ Gói tin phản hồi xác nhận bên nhận đã nhận thành công một gó
 ### 8.5 Cơ chế phát hiện và xử lý lỗi (Reliability & Error Handling)
 
 1. **Mất gói và gửi lại (Packet Loss & Retransmission):**
-   - Phía gửi (`FileSender`) duy trì bộ đếm thời gian RTO thích ứng (RFC 6298).
-   - Nếu một mảnh gửi đi quá thời gian RTO mà chưa nhận được gói `ACK` tương ứng, sender coi như mảnh đó bị mất và tự động gửi lại (retransmit).
+   - Phía gửi (`FileSender`) duy trì cửa sổ trượt `cwnd` (`CubicController`) và bộ đếm thời gian RTO thích ứng (RFC 6298).
+   - Nếu một mảnh gửi đi quá thời gian RTO mà chưa nhận được gói `ACK` tương ứng, sender coi như mảnh đó bị mất (`on_loss`), giảm `cwnd` 30% và tự động gửi lại (retransmit).
+   - Phía `Server`: khi `FILE_META` hoặc `FILE_CHUNK` được gửi lại với cùng `msg_id`, Server cập nhật `last_activity` và chuyển tiếp lại sang người nhận mà không tạo phiên trùng lặp.
 
 2. **Nhận lệch thứ tự (Out-of-order Delivery):**
-   - Do đặc tính của UDP, các gói `FILE_CHUNK` có thể đến lệch thứ tự (ví dụ chunk 2 đến trước chunk 1).
+   - Do đặc tính của UDP, các gói `FILE_CHUNK` có thể đến lệch thứ tự (ví dụ `chunk 2` đến trước `chunk 1`).
+   - `Server` chuyển tiếp độc lập từng gói `FILE_CHUNK` ngay khi nhận được (không giữ bộ đệm mảnh, tránh Head-of-Line blocking).
    - `FileReceiver` lưu các mảnh vào một từ điển đệm (buffer) theo `chunk index`. Receiver chỉ bắt đầu ghép file khi đã thu thập đủ 100% các mảnh từ `0` đến `total - 1`.
 
 3. **Gói tin trùng lặp (Duplicate Packets):**
    - Nếu gói tin `ACK` bị mất hoặc mạng bị trễ khiến bên gửi truyền lại mảnh mà bên nhận đã có:
+   - `Server` cho phép chuyển tiếp mọi gói `FILE_META`, `FILE_CHUNK` và `ACK` gửi lại thuộc phiên đang mở.
    - `FileReceiver` kiểm tra `chunk index`, nếu đã có trong bộ đệm thì bỏ qua không ghi đè, **nhưng vẫn gửi lại gói `ACK`** tương ứng để phía gửi biết và trượt cửa sổ gửi tiếp.
 
 4. **Kiểm tra tính toàn vẹn (Integrity Verification & Corrupted File):**
+   - `Server` dùng `parse_udp()` kiểm tra header 37 bytes, giải mã Fernet và kiểm tra tính hợp lệ của `FILE_META` (`filename`, `size >= 0`, `chunks >= 1`, `checksum` SHA-256 64 ký tự hex) cũng như giới hạn chỉ số mảnh (`0 <= chunk < total`). Gói hỏng hoặc sai định dạng bị loại bỏ an toàn.
    - Sau khi nhận đủ tất cả các mảnh, `FileReceiver` ghép toàn bộ các mảnh nhị phân lại thành nội dung file hoàn chỉnh theo đúng thứ tự từ 0 đến `total - 1`.
    - Tính toán mã băm SHA-256 trên nội dung vừa ghép:
      - **Nếu SHA-256 khớp với `checksum` trong `FILE_META`**: File hợp lệ 100%, ghi file vào thư mục lưu trữ `downloads/` và thông báo hoàn tất.
      - **Nếu SHA-256 không khớp**: File bị lỗi hoặc hỏng trong quá trình truyền. Receiver hủy toàn bộ dữ liệu tạm của file đó, ghi log báo lỗi và không lưu file hỏng vào ổ đĩa.
 
-5. **Hủy phiên do quá hạn (Session Timeout):**
-   - Nếu trong vòng **30 giây** mà không có bất kỳ gói tin mới nào đến cho một phiên truyền file (`msg_id`), cả Server, FileSender và FileReceiver sẽ tự động hủy phiên và giải phóng tài nguyên bộ nhớ đệm để tránh rò rỉ bộ nhớ (memory leak).
-   
+5. **Hủy phiên do quá hạn hoặc rời mạng (Session Timeout & Peer Disconnect):**
+   - Nếu trong vòng **30 giây** (`FILE_SESSION_TIMEOUT = 30.0`) mà không có bất kỳ gói tin mới nào đến cho một phiên truyền file (`msg_id`), cả `Server` (`cleanup_file_sessions`), `FileSender` và `FileReceiver` sẽ tự động hủy phiên và giải phóng tài nguyên bộ nhớ đệm để tránh rò rỉ bộ nhớ (memory leak).
+   - Nếu người gửi hoặc người nhận cuối cùng ngắt kết nối (`BYE` / mất heartbeat quá `10s`), `Server` tự động đóng phiên truyền file tương ứng (`close_sessions_for_user`) và ghi log.
+
+---
+
+### 8.6 Server Relay File & Quản lý phiên (`server.py`)
+
+Thiết kế nhóm chọn: **1A – File đi qua Server** (`Alice -> Server -> Bob`) và **2A – ACK đầu-cuối** (`Bob` gửi `ACK`, `Server` chỉ chuyển tiếp, không lưu mảnh).
+
+- **Bảng phiên (`file_sessions`)**: Ánh xạ `msg_id -> FileSession(sender, sender_addr, receivers, receiver_addrs, ...)` lưu cặp `(địa chỉ A, địa chỉ B)` và thời điểm hoạt động gần nhất (`last_activity`).
+- **Tái sử dụng hoàn toàn `protocol.py`**:
+  - Giải mã và kiểm tra gói đến bằng `parse_udp(data)`.
+  - Đóng gói và chuyển tiếp bằng đúng bộ hàm helper có sẵn: `pack_file_meta()`, `pack_file_chunk()`, `pack_ack()`.
+- **Vòng đời phiên & Logging**: Ghi log khi mở phiên (người gửi, địa chỉ A, người nhận, địa chỉ B, tên file, kích thước, tổng số chunk) và khi đóng phiên (lý do đóng, tổng số gói chuyển mỗi chiều `A->B`, `B->A`, thời lượng phiên).
+
+---
+
+### 8.7 Điều khiển tắc nghẽn CUBIC & RTO thích ứng (`congestion.py`)
+
+`CubicController` kết hợp cùng `RttEstimator` (RFC 6298) điều khiển tốc độ gửi của `FileSender` (đơn vị: số mảnh `FILE_CHUNK` đang bay trên mạng).
+
+| Thành phần | Mô tả |
+| :--- | :--- |
+| `cwnd` | Bắt đầu `2` mảnh (`INITIAL_CWND = 2`), tối đa `64` mảnh (`MAX_CWND = 64`), không giảm dưới `2` mảnh (`MIN_CWND = 2`). |
+| Slow start | `ssthresh` ban đầu = `64`; mỗi `ACK` nhận được tăng `cwnd` thêm `1.0` cho tới khi gặp mất gói hoặc `cwnd >= ssthresh`. |
+| Congestion avoidance | Sau lần mất gói, `cwnd` tăng theo hàm CUBIC `W(t) = C * (t - K)^3 + W_max` (`C = 0.4`, `K = ((W_max - cwnd) / C)^(1/3)`). |
+| Mất gói (Timeout) | Quá `rto` chưa có `ACK` = mất gói: lưu `W_max = cwnd`, giảm `cwnd = 0.7 * cwnd` (giảm 30%), đặt `ssthresh = cwnd`. Nhiều mảnh timeout trong cùng một lượt chỉ tính **1** lần mất. |
+| RTT / RTO (RFC 6298) | `SRTT = 7/8 * SRTT + 1/8 * RTT`, `RTTVAR = 3/4 * RTTVAR + 1/4 * |SRTT - RTT|`, `RTO = SRTT + 4 * RTTVAR` (kẹp trong khoảng `0.2s`–`8.0s`); khi timeout thì `RTO` nhân đôi (exponential backoff). |
+| Thuật toán Karn | Mảnh đã gửi lại (retransmitted) không dùng làm mẫu đo RTT (`on_ack(None)`). |
+
+**Giao diện cho `FileSender`:**
+- `can_send(inflight) -> bool`: Trả về `True` nếu `inflight < int(cwnd)`.
+- `on_ack(rtt=None)`: Gọi khi nhận `ACK`; truyền `rtt = None` nếu mảnh đó đã từng phải gửi lại.
+- `on_loss(sent_time=None) -> bool`: Gọi khi mảnh bị timeout; gộp các mảnh timeout cùng lượt thành 1 lần giảm `cwnd`.
+- `rto -> float`: Giá trị timeout hiện tại (giây) để kiểm tra các mảnh chưa được xác nhận.
+
 ## 9. Connection Sequence Diagram (Handshake -> Auth -> Disconnect)
 
 Sơ đồ trình tự (Sequence Diagram) mô tả toàn bộ vòng đời kết nối từ lúc Client thiết lập TCP, gửi bản tin `HELLO`, thực hiện xác thực `AUTH`, duy trì phiên và ngắt kết nối an toàn (`BYE` hoặc ngắt đột ngột):
@@ -503,3 +547,4 @@ sequenceDiagram
         Server->>All: Broadcast USER_LIST cập nhật (Alice offline)
     end
 ```
+

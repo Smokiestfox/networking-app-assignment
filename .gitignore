@@ -87,3 +87,6 @@ __pycache__/
 *.pyc
 .pytest_cache/
 *.log
+
+
+client_demo.py

@@ -1,25 +1,72 @@
-import json
 import os
 import socket
 import threading
 import time
 from datetime import datetime
-from config import SERVER_HOST, TCP_PORT, UDP_PORT, CLIENT_TIMEOUT
+from config import SERVER_HOST, TCP_PORT, UDP_PORT, CLIENT_TIMEOUT, FILE_SESSION_TIMEOUT
 from protocol import (
     recv_json_frame,
     send_json_frame,
     parse_udp,
-    encode_packet,
+    build_udp,
     pack_msg,
     pack_user_list,
+    pack_file_meta,
+    pack_file_chunk,
+    pack_ack,
     json_obj,
+    FLAG_END,
     Packet,
     SeqCounter,
     HEARTBEAT,
     MSG,
     USER_LIST,
+    FILE_META,
+    FILE_CHUNK,
+    ACK,
 )
 from registry import UserRegistry
+
+
+class FileSession:
+    """Phiên truyền file: msg_id -> (địa chỉ A, địa chỉ B) kèm thông tin người gửi/nhận.
+    Server chỉ định tuyến gói tin (FILE_META, FILE_CHUNK, ACK), không lưu trữ mảnh dữ liệu.
+    """
+
+    def __init__(self, msg_id, sender, sender_addr, receivers, receiver_addrs,
+                 filename, size, chunks, checksum, broadcast=False):
+        self.msg_id = msg_id
+        self.sender = sender
+        self.sender_addr = sender_addr          # địa chỉ UDP của A (ip, port)
+        self.receivers = list(receivers)        # danh sách username nhận (B...)
+        self.receiver_addrs = dict(receiver_addrs)  # username -> (ip, port)
+        self.broadcast = broadcast
+        self._label = "*" if broadcast else self.receivers[0]
+        self.filename = filename
+        self.size = size
+        self.chunks = chunks
+        self.checksum = checksum
+        self.created = time.time()
+        self.last_activity = self.created
+        self.to_receiver = 0   # số datagram chuyển A -> B (FILE_META / FILE_CHUNK)
+        self.to_sender = 0     # số datagram chuyển B -> A (ACK)
+
+    @property
+    def receiver(self):
+        """Tên người nhận (unicast) hoặc '*' (broadcast)."""
+        return self._label
+
+    @property
+    def receiver_addr(self):
+        """Địa chỉ UDP của người nhận B (unicast) hoặc None nếu đã rời."""
+        if self.broadcast:
+            return list(self.receiver_addrs.values())
+        return self.receiver_addrs.get(self._label)
+
+    @property
+    def endpoints(self):
+        """Trả về cặp (địa chỉ A, địa chỉ B) của phiên."""
+        return (self.sender_addr, self.receiver_addr)
 
 
 class CollaborationServer:
@@ -32,6 +79,7 @@ class CollaborationServer:
         registry=None,
         users_file="users.json",
         client_timeout=CLIENT_TIMEOUT,
+        file_session_timeout=FILE_SESSION_TIMEOUT,
     ):
         self.host = host
         self.port = port
@@ -61,6 +109,11 @@ class CollaborationServer:
         # Theo dõi thời gian heartbeat gần nhất: username -> float timestamp
         self.last_seen = {}
         self.last_seen_lock = threading.Lock()
+
+        # Bảng phiên truyền file: msg_id (uuid.UUID) -> FileSession
+        self.file_session_timeout = file_session_timeout
+        self.file_sessions = {}
+        self.file_sessions_lock = threading.Lock()
 
     def log_file_write(self, text):
         if self.log_file:
@@ -136,9 +189,8 @@ class CollaborationServer:
 
         # Đóng gói lại payload sau khi cập nhật 'from'
         if pkt is not None:
-            if isinstance(body, dict):
-                pkt.payload = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-            raw_data = encode_packet(pkt, encrypt=True)
+            raw_data = build_udp(pkt.ptype, body if isinstance(body, dict) else {}, pkt.seq,
+                                 msg_id=pkt.msg_id, ack=pkt.ack)
         elif isinstance(packet, (bytes, bytearray)):
             raw_data = bytes(packet)
         else:
@@ -180,6 +232,261 @@ class CollaborationServer:
                 self.log_file_write(text)
 
         return sent_to
+
+    # ------------------------------------------------------------------
+    # File relay & Session Management (Week 4 - Section 8 & 8.5 of protocol.md)
+    # ------------------------------------------------------------------
+    def log_event(self, text):
+        text = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {text}"
+        print(text, flush=True)
+        self.log_file_write(text)
+
+    def user_by_udp_addr(self, addr):
+        """Tìm username từ địa chỉ UDP nguồn (trong bảng udp_addrs hoặc registry)."""
+        with self.udp_addrs_lock:
+            for user, udp_addr in self.udp_addrs.items():
+                if udp_addr == addr:
+                    return user
+        with self.registry.lock:
+            for user, info in self.registry.active_users.items():
+                udp_port = info.get("udp_port")
+                if udp_port and (info.get("ip", "127.0.0.1"), int(udp_port)) == addr:
+                    return user
+        return None
+
+    def _resolve_sender(self, addr, claimed_sender=None):
+        """Xác định người gửi thực tế từ địa chỉ UDP nguồn và cập nhật last_seen / udp_addrs."""
+        sender = self.user_by_udp_addr(addr)
+        if sender is None and claimed_sender and self.registry.is_active(claimed_sender):
+            if self.get_user_udp_addr(claimed_sender) is None:
+                sender = claimed_sender
+        if sender is None or not self.registry.is_active(sender):
+            return None
+        with self.last_seen_lock:
+            self.last_seen[sender] = time.time()
+        with self.udp_addrs_lock:
+            self.udp_addrs[sender] = addr
+        return sender
+
+    @staticmethod
+    def _valid_file_meta(body):
+        """Kiểm tra tính hợp lệ của metadata theo mục 8.2 & 8.5.4 (size, chunks, checksum SHA-256)."""
+        filename = body.get("filename")
+        size = body.get("size")
+        chunks = body.get("chunks")
+        checksum = body.get("checksum")
+        if not isinstance(filename, str) or not filename.strip():
+            return False
+        if not isinstance(size, int) or size < 0:
+            return False
+        if not isinstance(chunks, int) or chunks < 1:
+            return False
+        if not isinstance(checksum, str) or len(checksum) != 64:
+            return False
+        return True
+
+    def handle_file_meta(self, packet, body, addr):
+        """Xử lý FILE_META (mục 8.1, 8.2, 8.5):
+        - Kiểm tra người gửi & người nhận đang online.
+        - Tạo / cập nhật phiên msg_id -> (địa chỉ A, địa chỉ B); hỗ trợ gửi lại FILE_META khi mất ACK (8.5.1/8.5.3).
+        - Dùng pack_file_meta() có sẵn trong protocol.py để đóng gói và chuyển tiếp tới B.
+        """
+        sender = self._resolve_sender(addr, body.get("from"))
+        if sender is None:
+            self.log_file_write(f"FILE_META from unknown/offline address {addr} dropped")
+            return
+
+        if not self._valid_file_meta(body):
+            self.log_event(f"File session rejected: invalid FILE_META fields from '{sender}'")
+            return
+
+        target = body.get("to")
+        broadcast = target == "*"
+        if broadcast:
+            receivers = []
+            receiver_addrs = {}
+            for u in self.registry.get_active_users():
+                if u != sender:
+                    u_addr = self.get_user_udp_addr(u)
+                    if u_addr is not None:
+                        receivers.append(u)
+                        receiver_addrs[u] = u_addr
+            if not receivers:
+                self.log_event(f"File session rejected: nobody online to receive broadcast from '{sender}'")
+                return
+        else:
+            if not target or target == sender:
+                self.log_event(f"File session rejected: invalid target '{target}' from '{sender}'")
+                return
+            if not self.registry.is_active(target):
+                self.log_event(f"File session rejected: receiver '{target}' is offline (sender '{sender}')")
+                return
+            recv_addr = self.get_user_udp_addr(target)
+            if recv_addr is None:
+                self.log_event(f"File session rejected: no UDP address for '{target}' (sender '{sender}')")
+                return
+            receivers = [target]
+            receiver_addrs = {target: recv_addr}
+
+        created = False
+        with self.file_sessions_lock:
+            session = self.file_sessions.get(packet.msg_id)
+            if session is None:
+                session = FileSession(
+                    msg_id=packet.msg_id,
+                    sender=sender,
+                    sender_addr=addr,
+                    receivers=receivers,
+                    receiver_addrs=receiver_addrs,
+                    filename=body["filename"],
+                    size=body["size"],
+                    chunks=body["chunks"],
+                    checksum=body["checksum"],
+                    broadcast=broadcast,
+                )
+                self.file_sessions[packet.msg_id] = session
+                created = True
+            elif session.sender != sender or session.broadcast != broadcast or (
+                    not broadcast and session.receivers != receivers):
+                self.log_event(f"File session {packet.msg_id} conflict: META from '{sender}' dropped")
+                return
+            else:
+                # 8.5.1 & 8.5.3: FILE_META gửi lại (retransmit) -> cập nhật địa chỉ mới nhất và chuyển tiếp lại
+                session.sender_addr = addr
+                for u in list(session.receivers):
+                    u_addr = self.get_user_udp_addr(u)
+                    if u_addr is not None:
+                        session.receiver_addrs[u] = u_addr
+            session.last_activity = time.time()
+            dest_items = list(session.receiver_addrs.items())
+
+        # Dùng hàm pack_file_meta có sẵn trong protocol.py (ghi đè 'from' = sender thực tế)
+        raw = pack_file_meta(
+            to=target,
+            sender=sender,
+            filename=body["filename"],
+            size=body["size"],
+            chunks=body["chunks"],
+            checksum=body["checksum"],
+            seq=packet.seq,
+            msg_id=packet.msg_id,
+        )
+        sent = self._send_to_targets(raw, dest_items)
+        with self.file_sessions_lock:
+            session.to_receiver += sent
+        if created:
+            self.log_event(
+                f"File session {packet.msg_id} opened: {sender} ({addr[0]}:{addr[1]}) -> "
+                f"{session.receiver} ({session.receiver_addr}) "
+                f"file='{session.filename}' size={session.size} chunks={session.chunks}"
+            )
+
+    def _send_to_targets(self, raw, dest_items):
+        """Gửi datagram tới danh sách (username, udp_addr); trả về số datagram đã gửi thành công."""
+        sent = 0
+        for user, dest_addr in dest_items:
+            if not self.registry.is_active(user):
+                continue
+            current_addr = self.get_user_udp_addr(user) or dest_addr
+            if current_addr is None:
+                continue
+            try:
+                self.udp_sock.sendto(raw, current_addr)
+                sent += 1
+            except OSError as e:
+                self.log_file_write(f"File relay to '{user}' at {current_addr} failed: {e}")
+        return sent
+
+    def relay_file_packet(self, packet, body, addr):
+        """Chuyển tiếp FILE_CHUNK (A -> B) và ACK (B -> A) theo bảng phiên msg_id -> (địa chỉ A, địa chỉ B):
+        - Dùng pack_file_chunk() và pack_ack() có sẵn trong protocol.py.
+        - Hỗ trợ nhận lệch thứ tự (8.5.2) và gói gửi lại/trùng lặp (8.5.1, 8.5.3); không lưu mảnh trên server.
+        """
+        user = self._resolve_sender(addr)
+        if user is None:
+            return
+
+        with self.file_sessions_lock:
+            session = self.file_sessions.get(packet.msg_id)
+            if session is None:
+                return                               # phiên đã đóng / quá hạn 30s / không tồn tại: bỏ qua
+
+            if user == session.sender and packet.ptype == FILE_CHUNK:
+                if packet.chunk >= session.chunks or packet.total != session.chunks:
+                    return                           # chỉ số chunk không khớp phiên
+                session.sender_addr = addr
+                dest_items = list(session.receiver_addrs.items())
+                flags = FLAG_END if (packet.flags & FLAG_END) else 0
+                raw = pack_file_chunk(
+                    msg_id=packet.msg_id,
+                    chunk=packet.chunk,
+                    total=packet.total,
+                    data=body,
+                    seq=packet.seq,
+                    flags=flags,
+                )
+            elif user in session.receivers and packet.ptype == ACK:
+                session.receiver_addrs[user] = addr
+                dest_items = [(session.sender, session.sender_addr)]
+                raw = pack_ack(
+                    ack_seq=packet.ack,
+                    seq=packet.seq,
+                    msg_id=packet.msg_id,
+                    chunk=packet.chunk,
+                )
+            else:
+                return                               # bên thứ ba hoặc sai chiều: bỏ
+
+            session.last_activity = time.time()
+            msg_id = session.msg_id
+
+        sent = self._send_to_targets(raw, dest_items)
+        with self.file_sessions_lock:
+            if packet.ptype == FILE_CHUNK:
+                session.to_receiver += sent
+            else:
+                session.to_sender += sent
+        if sent == 0:
+            self.close_file_session(msg_id, "peer went offline")
+
+    def close_file_session(self, msg_id, reason):
+        with self.file_sessions_lock:
+            session = self.file_sessions.pop(msg_id, None)
+        if session is None:
+            return False
+        duration = time.time() - session.created
+        self.log_event(
+            f"File session {msg_id} closed ({reason}): {session.sender} -> {session.receiver} "
+            f"file='{session.filename}' relayed A->B={session.to_receiver} B->A={session.to_sender} "
+            f"duration={duration:.1f}s"
+        )
+        return True
+
+    def close_sessions_for_user(self, username):
+        """Dọn phiên khi một bên rời: người gửi rời, hoặc người nhận cuối cùng rời => đóng phiên."""
+        to_close = []
+        with self.file_sessions_lock:
+            for mid, sess in self.file_sessions.items():
+                if sess.sender == username:
+                    to_close.append(mid)
+                elif username in sess.receivers:
+                    sess.receivers.remove(username)
+                    sess.receiver_addrs.pop(username, None)
+                    if not sess.receivers:
+                        to_close.append(mid)
+        for mid in to_close:
+            self.close_file_session(mid, f"'{username}' left")
+        return to_close
+
+    def cleanup_file_sessions(self):
+        """8.5.5: Dọn phiên không có gói nào trong file_session_timeout giây (mặc định 30s)."""
+        now = time.time()
+        with self.file_sessions_lock:
+            ids = [mid for mid, s in self.file_sessions.items()
+                   if now - s.last_activity > self.file_session_timeout]
+        for mid in ids:
+            self.close_file_session(mid, f"idle > {self.file_session_timeout:g}s")
+        return ids
 
     def broadcast_user_list(self):
         """Gửi gói tin USER_LIST (ptype=6) cập nhật danh sách user online qua UDP."""
@@ -226,6 +533,7 @@ class CollaborationServer:
                     conn = info.get("conn")
 
             self.registry.unregister(username=user)
+            self.close_sessions_for_user(user)
             if conn:
                 try:
                     conn.close()
@@ -245,6 +553,7 @@ class CollaborationServer:
         while self.running:
             try:
                 self.cleanup_stale_users()
+                self.cleanup_file_sessions()
             except Exception as e:
                 text = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Error in cleanup_loop: {e}"
                 self.log_file_write(text)
@@ -308,6 +617,12 @@ class CollaborationServer:
                     with self.udp_addrs_lock:
                         self.udp_addrs[sender] = addr
                 self.forward(sender, packet)
+
+            # 3. Relay file: FILE_META / FILE_CHUNK / ACK (chỉ chuyển tiếp, không lưu mảnh)
+            elif packet.ptype == FILE_META:
+                self.handle_file_meta(packet, body, addr)
+            elif packet.ptype in (FILE_CHUNK, ACK):
+                self.relay_file_packet(packet, body, addr)
 
     def handle_client(self, conn, addr):
         client_ip, client_port = addr[0], addr[1]
@@ -429,6 +744,7 @@ class CollaborationServer:
             was_active = False
             if current_username:
                 was_active = self.registry.unregister(username=current_username)
+                self.close_sessions_for_user(current_username)
                 with self.last_seen_lock:
                     self.last_seen.pop(current_username, None)
                 with self.udp_addrs_lock:
