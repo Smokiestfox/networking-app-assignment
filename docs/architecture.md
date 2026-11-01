@@ -1,8 +1,8 @@
 # System Architecture – Networking App Assignment
 
-> **Scope:** Week 3 – UDP Messaging, Heartbeat & Liveness (Rubric 5), built on Week 1-2 (handshake, authentication, concurrency).
+> **Scope:** Week 4 – reliable unicast UDP file transfer, alongside chat and heartbeat.
 >
-> **Status note:** The Server UDP Engine (routing + liveness monitor) is **not yet merged into `server.py`**. Until it is, `server_demo.py` runs the real TCP server plus a temporary UDP engine (`DemoUdpEngine`) so that `client.py` can be tested end to end. Sections marked **[Planned in server.py]** describe the target design; the demo already implements it in one process.
+> Run `server.py` directly: TCP control, UDP routing, file relay and cleanup are integrated. `server_demo.py` is an older Week 3 reference and is not used for Week 4 validation.
 
 ---
 
@@ -13,15 +13,19 @@ The system keeps network logic, state/data processing, and the user interface se
 ```mermaid
 graph TD
     subgraph L3["Layer 3 – Presentation"]
-        CLI["CLI Chat (client.py): /all /to /list /quit"]
+        CLI["CLI (client.py): /all /to /send /list /quit"]
         SIM["Demo Simulator (simulate_demo.py)"]
         UI["Web UI (Week 5)"]
     end
 
     subgraph L2["Layer 2 – Application & State"]
-        CLIENT["client.py (session state + 3 threads)"]
+        CLIENT["client.py (main + heartbeat + listener + file worker)"]
+        FILES["file_transfers.py: event queue and progress logging"]
+        SENDER["file_sender.py: chunking, window, retransmissions"]
+        RECEIVER["Receiver contract: file_receiver.py (Hau, pending)<br/>file_receiver_demo.py (explicit demo mode)"]
+        CC["congestion.py: CUBIC and RTT/RTO"]
         SERVER["server.py: TCP control server (thread-per-client)"]
-        UDPENG["Server UDP Engine: receiver, router, cleanup loop<br/>[Planned in server.py - temporary: server_demo.py]"]
+        UDPENG["server.py: UDP routing, file relay, cleanup"]
         REG["UserRegistry (registry.py, thread-safe active users)"]
         AUTH_DB[("users.json")]
     end
@@ -35,7 +39,11 @@ graph TD
     SIM --> CLIENT
     UI -.-> CLIENT
     CLIENT <-->|"TCP 9000: HELLO / AUTH / USER_LIST / BYE"| SERVER
-    CLIENT <-->|"UDP 9001: HEARTBEAT / MSG / USER_LIST"| UDPENG
+    CLIENT <-->|"UDP 9001: heartbeat, chat, file META/CHUNK/ACK"| UDPENG
+    CLIENT --> FILES
+    FILES --> SENDER
+    FILES --> RECEIVER
+    SENDER --> CC
     SERVER <--> REG
     UDPENG <--> REG
     REG <--> AUTH_DB
@@ -50,7 +58,7 @@ graph TD
 | Channel     | Port | Purpose                                                        | Framing                                                         |
 | ----------- | :--: | -------------------------------------------------------------- | --------------------------------------------------------------- |
 | TCP control | 9000 | Handshake, login, logout, on-demand user list                  | 4-byte length prefix + JSON                                     |
-| UDP data    | 9001 | Heartbeat, chat messages (broadcast / unicast), user-list push | One packet per datagram: 37-byte header + Fernet-encrypted JSON |
+| UDP data    | 9001 | Heartbeat, chat, user lists, reliable unicast files | 37-byte header; encrypted JSON or binary chunks; empty ACK payload |
 
 The TCP session is the source of truth for **who is logged in**. The UDP channel only carries real-time traffic for users who are already active in the registry.
 
@@ -67,8 +75,8 @@ flowchart TD
     Main -->|"spawn daemon thread"| T2["TCP worker 2<br/>handle_client(bob)"]
     Main -->|"spawn daemon thread"| TN["TCP worker N<br/>handle_client(...)"]
 
-    RX["udp-recv thread<br/>recvfrom() on port 9001<br/>parse_udp -> HEARTBEAT / MSG"]
-    CL["udp-cleanup thread<br/>cleanup_loop() every 1 s"]
+    RX["udp-recv thread<br/>recvfrom() on port 9001<br/>heartbeat, chat, file relay"]
+    CL["udp-cleanup thread<br/>cleanup_loop() every 0.5 s"]
 
     T1 <-->|"registry.lock"| Reg[("UserRegistry<br/>active_users")]
     T2 <-->|"registry.lock"| Reg
@@ -81,12 +89,12 @@ flowchart TD
 ```
 
 - **Thread isolation:** a slow or abruptly closed TCP client only affects its own worker thread.
-- **UDP never blocks TCP:** the UDP receive loop uses a 0.5 s socket timeout so it can stop cleanly, and handles `ConnectionResetError` (Windows reports ICMP "port unreachable" this way) by continuing.
-- **Two locks, two responsibilities:** `registry.lock` protects the active-user table; a separate lock protects the UDP address and `last_seen` maps. Threads never hold both at the same time, which avoids deadlocks.
+- **UDP and TCP run independently.** The UDP loop handles `ConnectionResetError` by continuing. `stop()` closes both sockets.
+- Separate locks protect the registry, UDP addresses, heartbeat timestamps and file-session table. Network sends run outside the file-session lock.
 
 ---
 
-## 3. Server UDP Engine – Routing & Liveness Monitor **[Planned in server.py]**
+## 3. Server UDP Engine – Routing & Liveness Monitor
 
 ### 3.1 Responsibilities
 
@@ -94,9 +102,10 @@ flowchart TD
 | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | UDP socket                                    | Bind `SERVER_HOST:UDP_PORT` (9001), run in parallel with the TCP listener inside `server.py`.                                                                                                                                                    |
 | Receive loop                                  | `recvfrom()` -> `parse_udp()`. A datagram that fails validation is logged and ignored, never crashes the server.                                                                                                                                 |
-| `HEARTBEAT` handler                         | Ignore users who are not logged in over TCP (`registry.is_active`). Otherwise store the **source address of the datagram** as the user's UDP address and refresh `last_seen`. The first heartbeat of a user triggers a `USER_LIST` push. |
-| `MSG` handler / `forward(sender, packet)` | Identify the sender from the datagram's source address (the `from` field sent by the client is overwritten with the registered username). Route by `to`.                                                                                         |
-| `cleanup_loop`                              | Every second: remove users whose TCP session has ended, and users with no heartbeat for `CLIENT_TIMEOUT` (10 s). Broadcast the new `USER_LIST` after every removal.                                                                              |
+| `HEARTBEAT` handler | Store the source UDP address and refresh `last_seen` for the supplied username. Endpoint authentication still needs hardening; see the review report. |
+| `MSG` handler / `forward(sender, packet)` | Existing Week 3 routing uses the claimed `from` field. It is separate from the Week 4 file endpoint checks. |
+| File handlers | Resolve registered endpoint, validate metadata and session direction; relay chunks and ACKs without buffering file data. |
+| `cleanup_loop` | Every 0.5 s: remove users silent for 10 s and file sessions idle for 30 s. TCP worker cleanup handles disconnects and broadcasts `USER_LIST`. |
 
 ### 3.2 Routing rules
 
@@ -104,7 +113,7 @@ flowchart TD
 | -------------------------------------------------------- | ------------------------------------------ | ----------------------------------- |
 | `"*"` (broadcast)                                      | Every user with a known UDP address        | The sender                          |
 | `"<username>"` (unicast)                               | Only that user                             | Everyone else, including the sender |
-| Unknown / offline user, or sender address not registered | Nobody; the datagram is dropped and logged | –                                  |
+| Offline recipient | Nobody; drop and log | All users |
 
 ### 3.3 Heartbeat timeout
 
@@ -114,7 +123,7 @@ When a user is alive over TCP but sends no heartbeat for 10 s, the engine unregi
 
 ## 4. Client Architecture
 
-`client.py` runs the TCP control session on the main thread and two UDP background threads:
+`client.py` runs TCP control on the main thread and three background threads:
 
 ```mermaid
 flowchart LR
@@ -122,12 +131,16 @@ flowchart LR
         Main["Main thread<br/>TCP: HELLO -> AUTH -> BYE<br/>CLI input loop"]
         HB["heartbeat thread<br/>sends HEARTBEAT every 2 s"]
         LS["udp-listener thread<br/>prints MSG, join / leave notices"]
+        FW["file worker<br/>hashing, META/CHUNK, retries, save, progress"]
         US(("UDP socket<br/>ephemeral port"))
     end
 
     Main -->|"/all, /to: pack_msg + sendto"| US
     HB -->|"pack_heartbeat + sendto"| US
     US -->|"recvfrom + parse_udp"| LS
+    LS -->|"queue FILE_META / FILE_CHUNK / ACK"| FW
+    Main -->|"queue /send user path"| FW
+    FW -->|"send_fn(bytes)"| US
     US <-->|"UDP 9001"| S["Server UDP Engine"]
     Main <-->|"TCP 9000"| T["Server TCP"]
 ```
@@ -137,6 +150,7 @@ flowchart LR
 | `/all <text>`       | Broadcast (`to = "*"`)                  | UDP               |
 | `/to <user> <text>` | Private message (`to = <user>`)         | UDP               |
 | `/list`             | Request the user list (with IP and port)  | TCP `USER_LIST` |
+| `/send <user> <file>` | Queue a reliable unicast file transfer | UDP via file worker |
 | `/quit`             | Stop threads, send `BYE`, close sockets | TCP               |
 
 - The client binds an ephemeral UDP port and sends one `HEARTBEAT` immediately after login, before any chat message, so the server learns its UDP address.
@@ -164,9 +178,8 @@ sequenceDiagram
 
     Note over C,U: 2. UDP registration (port 9001)
     C->>U: HEARTBEAT {username}
-    U->>R: is_active(username)
     U->>U: store source address, last_seen = now
-    U-->>C: USER_LIST {users} (pushed to everyone)
+    Note over C,U: USER_LIST is pushed on login/logout/timeout
 
     Note over C,U: 3. Chat and liveness
     loop every 2 s
@@ -201,9 +214,33 @@ stateDiagram-v2
     HANDSHAKING --> AUTHENTICATING : ACK for HELLO
     AUTHENTICATING --> LOGGED_IN : AUTH_OK, start UDP threads
     AUTHENTICATING --> DISCONNECTED : AUTH_FAIL
-    LOGGED_IN --> LOGGED_IN : send / receive MSG, HEARTBEAT, USER_LIST
+    LOGGED_IN --> LOGGED_IN : chat, heartbeat, background file transfers
     LOGGED_IN --> DISCONNECTING : /quit, Ctrl+C
-    LOGGED_IN --> DISCONNECTED : server closes TCP (heartbeat timeout)
+    LOGGED_IN --> DISCONNECTING : TCP closure detected on control request
     DISCONNECTING --> DISCONNECTED : BYE acknowledged, sockets closed
     DISCONNECTED --> [*]
 ```
+
+## 7. Week 4 file worker and lifecycle
+
+`FileTransfers` owns a bounded event queue and one file worker per client. `/send` queues a path immediately. The worker reads/hashes the file, constructs `FileSender`, ticks its CUBIC/RTO state, and dispatches incoming file packets to sender or receiver. The UDP listener only parses and queues file packets, so disk I/O and retransmission waits do not block incoming chat. Heartbeat remains on its own thread.
+
+Receiver selection is explicit. Default: import Hau's `file_receiver.FileReceiver`; if it is missing, receiving is disabled while chat/sending continue. `--demo-receiver` opts into `file_receiver_demo.FileReceiver` and prints a DEMO notice. The worker uses public `on_packet`, `tick`, `is_receiving` and `close` APIs, without depending on receiver session internals. See `docs/file-receiver-handoff.md`.
+
+`FileSender` and `FileReceiver` depend on `send_fn(bytes)`, not sockets. They can run on the production UDP socket or a seeded in-memory lossy link. Sender protects its state with an RLock. The file worker serializes receiver updates and ticks. SeqCounter is shared by heartbeat, chat and file traffic.
+
+| State | Transition |
+| --- | --- |
+| Sender WAIT_META | Send FILE_META; retry on RTO; begin chunks after matching ACK |
+| Sender SENDING | Up to cwnd outstanding chunks; selective ACK and retransmission |
+| Sender DONE | Every chunk ACKed, including the chunk completing receiver verification/save |
+| Sender FAILED | Offline notice, 30 s without new ACK, retry limit, read/network error or local exit |
+| Receiver RECEIVING | Store valid chunks by index, ACK duplicates, accept reordering |
+| Receiver COMPLETE | Verify SHA-256, save once, ACK completion, retain ACK tombstone 30 s |
+| Receiver FAILED | Checksum/save error; no completion ACK; discard buffered bytes |
+
+On logout the client stops the file worker before closing UDP, then sends TCP BYE. A `USER_LIST` offline notice cancels sends to that peer; if the notice is lost, the 30 s ACK inactivity limit still applies. Server closes file sessions on either peer leaving or 30 s inactivity; a successful live session otherwise expires by inactivity, since the current protocol has no FILE_DONE packet.
+
+Bounds: at most 8 outgoing sends and 16 receiver sessions per client. Files are read/buffered in memory within the uint16 chunk limit; streaming larger files from disk is future work. Completed receiver sessions hold no chunk bytes. No claim is made here about hostile-peer authentication: the pre-existing Week 3 heartbeat/message identity checks need separate hardening.
+
+Run the real three-client demo with `python simulate_demo.py --file-demo --demo-receiver --self-host`. This validates the sender against the reference receiver over real sockets. Hau's implementation needs its own run with the flag removed after delivery. Validation and baseline review are in `docs/reviews/week4-review.md`.
