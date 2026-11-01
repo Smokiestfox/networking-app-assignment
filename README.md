@@ -137,4 +137,3 @@ Trên macOS/Linux: `SIMULATE_LOSS=0.15 python client.py alice pass123 --demo-rec
 python -m pytest -q
 ```
 
-Test mặc định dùng receiver demo (`--file-receiver=demo`). Test mới gồm file rỗng, ~1 MB, mất 20%/trùng/đảo thứ tự bằng virtual clock, mất ACK metadata/cuối, checksum lỗi, receiver im lặng, và tích hợp TCP/UDP thật. Sau khi có code của Hậu, dùng `--file-receiver=production` để kiểm tra cùng contract. Xem đánh giá commit gốc và phạm vi kiểm chứng tại [review tuần 4](docs/reviews/week4-review.md).
