@@ -227,6 +227,68 @@ class TestMessaging(unittest.TestCase):
             server.stop()
             sock_bob.close()
 
+    def test_real_server_unicast_isolation_and_chat(self):
+        """
+        Test 9: Integration test voi Server thật
+        Alice gửi unicast cho Bob -> Charlie không nhận được.
+        Alice gửi broadcast -> ca Bob va Charlie deu nhan duoc (chat van chay).
+        """
+        test_tcp_port = 9250
+        test_udp_port = 9251
+        server = CollaborationServer(host="127.0.0.1", port=test_tcp_port, udp_port=test_udp_port)
+        server_thread = threading.Thread(target=server.run, daemon=True)
+        server_thread.start()
+        time.sleep(0.1)
+
+        sock_alice = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock_alice.bind(("127.0.0.1", 0))
+        port_alice = sock_alice.getsockname()[1]
+
+        sock_bob = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock_bob.bind(("127.0.0.1", 0))
+        port_bob = sock_bob.getsockname()[1]
+        sock_bob.settimeout(1.0)
+
+        sock_charlie = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock_charlie.bind(("127.0.0.1", 0))
+        port_charlie = sock_charlie.getsockname()[1]
+        sock_charlie.settimeout(0.5)
+
+        try:
+            server.registry.register("alice", "127.0.0.1", port_alice, udp_port=port_alice)
+            server.registry.register("bob", "127.0.0.1", port_bob, udp_port=port_bob)
+            server.registry.register("charlie", "127.0.0.1", port_charlie, udp_port=port_charlie)
+
+            raw_unicast = pack_msg(to="bob", sender="alice", text="Bi mat cho Bob", seq=1)
+            server.forward("alice", raw_unicast)
+
+            data_bob, _ = sock_bob.recvfrom(4096)
+            pkt_bob, body_bob = parse_udp(data_bob)
+            self.assertEqual(body_bob["to"], "bob")
+            self.assertEqual(body_bob["from"], "alice")
+            self.assertEqual(body_bob["text"], "Bi mat cho Bob")
+
+            with self.assertRaises(socket.timeout):
+                sock_charlie.recvfrom(4096)
+
+            raw_broadcast = pack_msg(to="*", sender="alice", text="Chat chung van chay", seq=2)
+            server.forward("alice", raw_broadcast)
+
+            data_bob_bc, _ = sock_bob.recvfrom(4096)
+            _, body_bob_bc = parse_udp(data_bob_bc)
+            self.assertEqual(body_bob_bc["text"], "Chat chung van chay")
+
+            data_charlie_bc, _ = sock_charlie.recvfrom(4096)
+            _, body_charlie_bc = parse_udp(data_charlie_bc)
+            self.assertEqual(body_charlie_bc["text"], "Chat chung van chay")
+
+        finally:
+            server.stop()
+            sock_alice.close()
+            sock_bob.close()
+            sock_charlie.close()
+            server_thread.join(timeout=1.0)
+
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main()

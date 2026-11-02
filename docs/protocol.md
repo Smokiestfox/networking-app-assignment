@@ -547,4 +547,39 @@ sequenceDiagram
         Server->>All: Broadcast USER_LIST cập nhật (Alice offline)
     end
 ```
+## 11. Sequence diagram File Flow 
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Alice as Client (Alice - Sender)
+    participant Server as Collaboration Server
+    participant Bob as Client (Bob - Receiver)
 
+    Note over Alice, Bob: Pha 1: Khởi tạo phiên truyền file (FILE_META)
+    Alice->>Server: FILE_META (msg_id, filename, size, chunks, checksum)
+    Server->>Bob: FILE_META (chuyển tiếp tới Bob)
+    Bob->>Server: ACK (xác nhận nhận FILE_META)
+    Server->>Alice: ACK (chuyển tiếp ACK về cho Alice)
+
+    Note over Alice, Bob: Pha 2: Truyền dữ liệu (FILE_CHUNK) & Cơ chế điều khiển tắc nghẽn CUBIC
+    Alice->>Server: FILE_CHUNK (chunk 0, data)
+    Server->>Bob: FILE_CHUNK (chuyển tiếp chunk 0)
+    
+    rect rgb(255, 230, 230)
+        Note over Alice, Bob: Tình huống giả lập mất gói tin hoặc timeout
+        Alice->>Server: FILE_CHUNK (chunk 1, data)
+        Note over Server, Bob: Gói tin bị mất trên đường truyền (Loss)
+        Note over Alice: Hết hạn RTO, FileSender kích hoạt CUBIC & giảm cwnd (on_loss)
+        Alice->>Server: FILE_CHUNK (chunk 1 - Gửi lại / Retransmit)
+        Server->>Bob: FILE_CHUNK (chuyển tiếp lại chunk 1)
+    end
+    ```
+
+    Bob->>Server: ACK (xác nhận chunk 1 thành công)
+    Server->>Alice: ACK (chuyển tiếp ACK về Alice, kích hoạt on_ack)
+
+    Note over Alice, Bob: Pha 3: Hoàn tất & Kiểm tra toàn vẹn SHA-256
+    Bob->>Bob: Ghép các chunk, tính mã băm SHA-256 đối chiếu với META
+    Bob->>Bob: Lưu file hoàn chỉnh vào thư mục downloads/bob/
+    Bob->>Server: ACK (hoàn tất phiên)
+    Server->>Alice: ACK (hoàn tất)

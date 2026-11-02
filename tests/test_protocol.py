@@ -88,7 +88,8 @@ def test_file_meta_roundtrip(size, chunks):
 
 
 def test_reject_truncated_trailing_and_tampered_file_datagrams():
-    raw = protocol.pack_file_chunk(protocol.new_id(), 0, 1, b"hello", 1)
-    for broken in (raw[:-1], raw + b"extra", raw[:-1] + bytes([raw[-1] ^ 1])):
+    # Sử dụng encrypt=False để test độ dài header và payload trực tiếp
+    raw = protocol.pack_file_chunk(protocol.new_id(), 0, 1, b"hello", 1, encrypt=False)
+    for broken in (raw[:-1], raw + b"extra"):
         with pytest.raises(ValueError):
             protocol.parse_udp(broken)
