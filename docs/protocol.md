@@ -573,7 +573,7 @@ sequenceDiagram
         Alice->>Server: FILE_CHUNK (chunk 1 - Gửi lại / Retransmit)
         Server->>Bob: FILE_CHUNK (chuyển tiếp lại chunk 1)
     end
-    ```
+```
 
     Bob->>Server: ACK (xác nhận chunk 1 thành công)
     Server->>Alice: ACK (chuyển tiếp ACK về Alice, kích hoạt on_ack)
