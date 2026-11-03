@@ -193,7 +193,6 @@ def run_client(
     ready_evt=None,
     session_stop=None,
     graceful_shutdown=True,      # False simulates closing a process without BYE in demos
-    demo_receiver=False,         # explicit opt-in; never replace Hau's production module silently
 ) -> bool:
     """
     Run the full chat client lifecycle:
@@ -306,7 +305,7 @@ def run_client(
     transfers = FileTransfers(
         username, lambda raw: udp_sock.sendto(raw, server_udp_addr), seq,
         download_dir if download_dir is not None else Path("downloads") / username,
-        loss_rate=loss_rate, stats=stats, seed=loss_seed, demo_receiver=demo_receiver,
+        loss_rate=loss_rate, stats=stats, seed=loss_seed,
     )
 
     hb_thread = threading.Thread(
@@ -488,12 +487,9 @@ def parse_cli_args(argv=None):
     parser.add_argument("password", nargs="?")
     parser.add_argument("host", nargs="?")
     parser.add_argument("port", nargs="?", type=int, default=TCP_PORT)
-    parser.add_argument("--demo-receiver", action="store_true",
-                        help="Use reference file_receiver_demo.py for development tests")
     return parser.parse_args(argv)
 
 
 if __name__ == "__main__":
     args = parse_cli_args()
-    run_client(username=args.username, password=args.password, host=args.host, port=args.port,
-               demo_receiver=args.demo_receiver)
+    run_client(username=args.username, password=args.password, host=args.host, port=args.port)

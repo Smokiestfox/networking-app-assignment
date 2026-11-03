@@ -144,16 +144,16 @@ Notes:
 
 Helpers for building and parsing UDP packets. They are thin wrappers around the existing `Packet`, `encode_packet()` and `decode_packet()` in `protocol.py`. The server and the client must use these helpers instead of calling `struct` directly.
 
-| Function                               | Description                                                                                                                |
-| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `build_udp(ptype, body, seq, ...)` | Builds a full datagram: 37-byte header + payload bytes. Returns `bytes`.                                                 |
-| `parse_udp(data)`                    | Parses a datagram into a `Packet` and a body (dict, or raw bytes for `FILE_CHUNK`). Raises an error if the magic number, version, or payload length is invalid. |
-| `pack_msg(to, sender, text, seq)`    | Convenience wrapper that builds a `MSG` packet (adds `time` automatically).                                            |
-| `pack_heartbeat(username, seq)`      | Convenience wrapper that builds a `HEARTBEAT` packet.                                                                    |
-| `pack_user_list(users, seq)`         | Convenience wrapper that builds a `USER_LIST` packet.                                                                    |
-| `pack_file_meta(to, sender, ...)`    | Builds a `FILE_META` packet (`ptype=3`, JSON metadata, `total=chunks`).                                                  |
-| `pack_file_chunk(msg_id, chunk, ...)`| Builds a `FILE_CHUNK` packet (`ptype=4`, raw binary payload, sets `FLAG_END` on final chunk).                            |
-| `pack_ack(ack_seq, seq, msg_id, ...)`| Builds an `ACK` packet (`ptype=5`, empty payload, header carries `ack`, `msg_id`, `chunk`).                              |
+| Function                                | Description                                                                                                                                                         |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `build_udp(ptype, body, seq, ...)`    | Builds a full datagram: 37-byte header + payload bytes. Returns `bytes`.                                                                                          |
+| `parse_udp(data)`                     | Parses a datagram into a `Packet` and a body (dict, or raw bytes for `FILE_CHUNK`). Raises an error if the magic number, version, or payload length is invalid. |
+| `pack_msg(to, sender, text, seq)`     | Convenience wrapper that builds a `MSG` packet (adds `time` automatically).                                                                                     |
+| `pack_heartbeat(username, seq)`       | Convenience wrapper that builds a `HEARTBEAT` packet.                                                                                                             |
+| `pack_user_list(users, seq)`          | Convenience wrapper that builds a `USER_LIST` packet.                                                                                                             |
+| `pack_file_meta(to, sender, ...)`     | Builds a `FILE_META` packet (`ptype=3`, JSON metadata, `total=chunks`).                                                                                       |
+| `pack_file_chunk(msg_id, chunk, ...)` | Builds a `FILE_CHUNK` packet (`ptype=4`, raw binary payload, sets `FLAG_END` on final chunk).                                                                 |
+| `pack_ack(ack_seq, seq, msg_id, ...)` | Builds an `ACK` packet (`ptype=5`, empty payload, header carries `ack`, `msg_id`, `chunk`).                                                               |
 
 Error handling: a datagram that is too short, has the wrong magic number, or whose declared payload length does not match the received data must be rejected with an error (and ignored by the receiver), never silently accepted.
 
@@ -318,7 +318,9 @@ sequenceDiagram
 ACK là **đầu-cuối**: do FileReceiver (B) tạo, server chỉ chuyển tiếp theo bảng phiên; cửa sổ trượt và timer nằm hoàn toàn ở FileSender (A).
 
 ### 8.1 Tổng quan quy trình truyền file
+
 Quy trình truyền file qua UDP giữa Client gửi (FileSender) và Client nhận (FileReceiver) thông qua Server relay:
+
 1. **Khởi tạo phiên (`FILE_META`)**: FileSender gửi gói tin `FILE_META` mang thông tin tên file, kích thước, tổng số chunk và mã băm SHA-256. Server chuyển tiếp bản tin này đến người nhận và tạo phiên quản lý (`msg_id`). Phía nhận chuẩn bị bộ nhớ đệm và phản hồi `ACK`.
 2. **Truyền dữ liệu nhị phân (`FILE_CHUNK`)**: FileSender chia nhỏ file thành các mảnh nhị phân (~700 bytes/mảnh), đánh số thứ tự từ `0` đến `total - 1`, gửi theo cửa sổ trượt (Sliding Window / CUBIC).
 3. **Phản hồi xác nhận (`ACK`)**: FileReceiver nhận từng mảnh, lưu vào bộ đệm và lập tức gửi gói tin `ACK` xác nhận số thứ tự của mảnh đó.
@@ -327,18 +329,20 @@ Quy trình truyền file qua UDP giữa Client gửi (FileSender) và Client nh�
 ---
 
 ### 8.2 Đặc tả gói tin FILE_META (Packet type = 3)
+
 Gói tin khởi tạo phiên truyền file. Header mang `ptype = 3`, `msg_id` phiên, và `total` là tổng số chunk. Payload là chuỗi JSON chứa metadata của file.
 
-| Trường | Kiểu dữ liệu | Bắt buộc | Mô tả | Ví dụ |
-| :--- | :---: | :---: | :--- | :--- |
-| `to` | string | Có | Tên người nhận (username) hoặc `"*"` nếu gửi broadcast (server chuyển cho mọi user đang online trừ người gửi) | `"bob"` |
-| `from` | string | Có | Tên người gửi (username) | `"alice"` |
-| `filename` | string | Có | Tên file gốc (không bao gồm đường dẫn tuyệt đối) | `"report.pdf"` |
-| `size` | int | Có | Kích thước file tính bằng byte | `1048576` |
-| `chunks` | int | Có | Tổng số mảnh được chia nhỏ | `1500` |
-| `checksum` | string | Có | Chuỗi băm SHA-256 (64 ký tự hex) của toàn bộ file gốc | `"e3b0c44298fc1c149afbf4c8..."` |
+| Trường     | Kiểu dữ liệu | Bắt buộc | Mô tả                                                                                                                                                         | Ví dụ                           |
+| :----------- | :-------------: | :--------: | :-------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------- |
+| `to`       |     string     |    Có    | Tên người nhận (username). Gửi broadcast file (`to = "*"`) hiện chưa hỗ trợ ở phía client (chỉ hỗ trợ truyền file tin cậy unicast end-to-end) | `"bob"`                         |
+| `from`     |     string     |    Có    | Tên người gửi (username)                                                                                                                                    | `"alice"`                       |
+| `filename` |     string     |    Có    | Tên file gốc (không bao gồm đường dẫn tuyệt đối)                                                                                                     | `"report.pdf"`                  |
+| `size`     |       int       |    Có    | Kích thước file tính bằng byte                                                                                                                             | `1048576`                       |
+| `chunks`   |       int       |    Có    | Tổng số mảnh được chia nhỏ                                                                                                                               | `1500`                          |
+| `checksum` |     string     |    Có    | Chuỗi băm SHA-256 (64 ký tự hex) của toàn bộ file gốc                                                                                                   | `"e3b0c44298fc1c149afbf4c8..."` |
 
 **Ví dụ Payload JSON:**
+
 ```json
 {
   "to": "bob",
@@ -353,7 +357,9 @@ Gói tin khởi tạo phiên truyền file. Header mang `ptype = 3`, `msg_id` ph
 ---
 
 ### 8.3 Đặc tả gói tin FILE_CHUNK (Packet type = 4)
+
 Gói tin mang một mảnh dữ liệu nhị phân thô của file.
+
 - **Header:**
   - `ptype = 4` (`FILE_CHUNK`).
   - `msg_id`: UUID phiên truyền file (khớp với `msg_id` trong `FILE_META`).
@@ -369,7 +375,9 @@ Gói tin mang một mảnh dữ liệu nhị phân thô của file.
 ---
 
 ### 8.4 Đặc tả gói tin ACK (Packet type = 5)
+
 Gói tin phản hồi xác nhận bên nhận đã nhận thành công một gói tin (bản tin chat, metadata hoặc mảnh file).
+
 - **Header:**
   - `ptype = 5` (`ACK`).
   - `ack`: Số thứ tự sequence của gói tin được xác nhận (`ack_seq`).
@@ -382,28 +390,29 @@ Gói tin phản hồi xác nhận bên nhận đã nhận thành công một gó
 ### 8.5 Cơ chế phát hiện và xử lý lỗi (Reliability & Error Handling)
 
 1. **Mất gói và gửi lại (Packet Loss & Retransmission):**
+
    - Phía gửi (`FileSender`) duy trì cửa sổ trượt `cwnd` (`CubicController`) và bộ đếm thời gian RTO thích ứng (RFC 6298).
    - Nếu một mảnh gửi đi quá thời gian RTO mà chưa nhận được gói `ACK` tương ứng, sender coi như mảnh đó bị mất (`on_loss`), giảm `cwnd` 30% và tự động gửi lại (retransmit).
    - Phía `Server`: khi `FILE_META` hoặc `FILE_CHUNK` được gửi lại với cùng `msg_id`, Server cập nhật `last_activity` và chuyển tiếp lại sang người nhận mà không tạo phiên trùng lặp.
-
 2. **Nhận lệch thứ tự (Out-of-order Delivery):**
+
    - Do đặc tính của UDP, các gói `FILE_CHUNK` có thể đến lệch thứ tự (ví dụ `chunk 2` đến trước `chunk 1`).
    - `Server` chuyển tiếp độc lập từng gói `FILE_CHUNK` ngay khi nhận được (không giữ bộ đệm mảnh, tránh Head-of-Line blocking).
    - `FileReceiver` lưu các mảnh vào một từ điển đệm (buffer) theo `chunk index`. Receiver chỉ bắt đầu ghép file khi đã thu thập đủ 100% các mảnh từ `0` đến `total - 1`.
-
 3. **Gói tin trùng lặp (Duplicate Packets):**
+
    - Nếu gói tin `ACK` bị mất hoặc mạng bị trễ khiến bên gửi truyền lại mảnh mà bên nhận đã có:
    - `Server` cho phép chuyển tiếp mọi gói `FILE_META`, `FILE_CHUNK` và `ACK` gửi lại thuộc phiên đang mở.
    - `FileReceiver` kiểm tra `chunk index`, nếu đã có trong bộ đệm thì bỏ qua không ghi đè, **nhưng vẫn gửi lại gói `ACK`** tương ứng để phía gửi biết và trượt cửa sổ gửi tiếp.
-
 4. **Kiểm tra tính toàn vẹn (Integrity Verification & Corrupted File):**
+
    - `Server` dùng `parse_udp()` kiểm tra header 37 bytes, giải mã Fernet và kiểm tra tính hợp lệ của `FILE_META` (`filename`, `size >= 0`, `chunks >= 1`, `checksum` SHA-256 64 ký tự hex) cũng như giới hạn chỉ số mảnh (`0 <= chunk < total`). Gói hỏng hoặc sai định dạng bị loại bỏ an toàn.
    - Sau khi nhận đủ tất cả các mảnh, `FileReceiver` ghép toàn bộ các mảnh nhị phân lại thành nội dung file hoàn chỉnh theo đúng thứ tự từ 0 đến `total - 1`.
    - Tính toán mã băm SHA-256 trên nội dung vừa ghép:
      - **Nếu SHA-256 khớp với `checksum` trong `FILE_META`**: File hợp lệ 100%, ghi file vào thư mục lưu trữ `downloads/` và thông báo hoàn tất.
      - **Nếu SHA-256 không khớp**: File bị lỗi hoặc hỏng trong quá trình truyền. Receiver hủy toàn bộ dữ liệu tạm của file đó, ghi log báo lỗi và không lưu file hỏng vào ổ đĩa.
-
 5. **Hủy phiên do quá hạn hoặc rời mạng (Session Timeout & Peer Disconnect):**
+
    - Nếu trong vòng **30 giây** (`FILE_SESSION_TIMEOUT = 30.0`) mà không có bất kỳ gói tin mới nào đến cho một phiên truyền file (`msg_id`), cả `Server` (`cleanup_file_sessions`), `FileSender` và `FileReceiver` sẽ tự động hủy phiên và giải phóng tài nguyên bộ nhớ đệm để tránh rò rỉ bộ nhớ (memory leak).
    - Nếu người gửi hoặc người nhận cuối cùng ngắt kết nối (`BYE` / mất heartbeat quá `10s`), `Server` tự động đóng phiên truyền file tương ứng (`close_sessions_for_user`) và ghi log.
 
@@ -425,16 +434,17 @@ Thiết kế nhóm chọn: **1A – File đi qua Server** (`Alice -> Server -> B
 
 `CubicController` kết hợp cùng `RttEstimator` (RFC 6298) điều khiển tốc độ gửi của `FileSender` (đơn vị: số mảnh `FILE_CHUNK` đang bay trên mạng).
 
-| Thành phần | Mô tả |
-| :--- | :--- |
-| `cwnd` | Bắt đầu `2` mảnh (`INITIAL_CWND = 2`), tối đa `64` mảnh (`MAX_CWND = 64`), không giảm dưới `2` mảnh (`MIN_CWND = 2`). |
-| Slow start | `ssthresh` ban đầu = `64`; mỗi `ACK` nhận được tăng `cwnd` thêm `1.0` cho tới khi gặp mất gói hoặc `cwnd >= ssthresh`. |
-| Congestion avoidance | Sau lần mất gói, `cwnd` tăng theo hàm CUBIC `W(t) = C * (t - K)^3 + W_max` (`C = 0.4`, `K = ((W_max - cwnd) / C)^(1/3)`). |
-| Mất gói (Timeout) | Quá `rto` chưa có `ACK` = mất gói: lưu `W_max = cwnd`, giảm `cwnd = 0.7 * cwnd` (giảm 30%), đặt `ssthresh = cwnd`. Nhiều mảnh timeout trong cùng một lượt chỉ tính **1** lần mất. |
-| RTT / RTO (RFC 6298) | `SRTT = 7/8 * SRTT + 1/8 * RTT`, `RTTVAR = 3/4 * RTTVAR + 1/4 * |SRTT - RTT|`, `RTO = SRTT + 4 * RTTVAR` (kẹp trong khoảng `0.2s`–`8.0s`); khi timeout thì `RTO` nhân đôi (exponential backoff). |
-| Thuật toán Karn | Mảnh đã gửi lại (retransmitted) không dùng làm mẫu đo RTT (`on_ack(None)`). |
+| Thành phần         | Mô tả                                                                                                                                                                                                               |
+| :------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cwnd`             | Bắt đầu `2` mảnh (`INITIAL_CWND = 2`), tối đa `64` mảnh (`MAX_CWND = 64`), không giảm dưới `2` mảnh (`MIN_CWND = 2`).                                                                         |
+| Slow start           | `ssthresh` ban đầu = `64`; mỗi `ACK` nhận được tăng `cwnd` thêm `1.0` cho tới khi gặp mất gói hoặc `cwnd >= ssthresh`.                                                                      |
+| Congestion avoidance | Sau lần mất gói, `cwnd` tăng theo hàm CUBIC `W(t) = C * (t - K)^3 + W_max` (`C = 0.4`, `K = ((W_max - cwnd) / C)^(1/3)`).                                                                                |
+| Mất gói (Timeout)  | Quá `rto` chưa có `ACK` = mất gói: lưu `W_max = cwnd`, giảm `cwnd = 0.7 * cwnd` (giảm 30%), đặt `ssthresh = cwnd`. Nhiều mảnh timeout trong cùng một lượt chỉ tính **1** lần mất. |
+| RTT / RTO (RFC 6298) | `SRTT = 7/8 * SRTT + 1/8 * RTT`, `RTTVAR = 3/4 * RTTVAR + 1/4 *                                                                                                                                                     |
+| Thuật toán Karn    | Mảnh đã gửi lại (retransmitted) không dùng làm mẫu đo RTT (`on_ack(None)`).                                                                                                                               |
 
 **Giao diện cho `FileSender`:**
+
 - `can_send(inflight) -> bool`: Trả về `True` nếu `inflight < int(cwnd)`.
 - `on_ack(rtt=None)`: Gọi khi nhận `ACK`; truyền `rtt = None` nếu mảnh đó đã từng phải gửi lại.
 - `on_loss(sent_time=None) -> bool`: Gọi khi mảnh bị timeout; gộp các mảnh timeout cùng lượt thành 1 lần giảm `cwnd`.
@@ -547,13 +557,15 @@ sequenceDiagram
         Server->>All: Broadcast USER_LIST cập nhật (Alice offline)
     end
 ```
-## 11. Sequence diagram File Flow 
+
+## 11. Sequence diagram File Flow
+
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Alice as Client (Alice - Sender)
+    participant Alice as Client (Alice Sender)
     participant Server as Collaboration Server
-    participant Bob as Client (Bob - Receiver)
+    participant Bob as Client (Bob Receiver)
 
     Note over Alice, Bob: Pha 1: Khởi tạo phiên truyền file (FILE_META)
     Alice->>Server: FILE_META (msg_id, filename, size, chunks, checksum)
@@ -561,25 +573,28 @@ sequenceDiagram
     Bob->>Server: ACK (xác nhận nhận FILE_META)
     Server->>Alice: ACK (chuyển tiếp ACK về cho Alice)
 
-    Note over Alice, Bob: Pha 2: Truyền dữ liệu (FILE_CHUNK) & Cơ chế điều khiển tắc nghẽn CUBIC
+    Note over Alice, Bob: Pha 2: Truyền dữ liệu (FILE_CHUNK) & điều khiển tắc nghẽn CUBIC
     Alice->>Server: FILE_CHUNK (chunk 0, data)
     Server->>Bob: FILE_CHUNK (chuyển tiếp chunk 0)
-    
+    Bob->>Server: ACK (chunk 0)
+    Server->>Alice: ACK (chuyển tiếp, kích hoạt on_ack)
+
     rect rgb(255, 230, 230)
-        Note over Alice, Bob: Tình huống giả lập mất gói tin hoặc timeout
+        Note over Alice, Bob: Tình huống mất gói tin hoặc timeout
         Alice->>Server: FILE_CHUNK (chunk 1, data)
         Note over Server, Bob: Gói tin bị mất trên đường truyền (Loss)
-        Note over Alice: Hết hạn RTO, FileSender kích hoạt CUBIC & giảm cwnd (on_loss)
-        Alice->>Server: FILE_CHUNK (chunk 1 - Gửi lại / Retransmit)
+        Note over Alice: Hết hạn RTO, FileSender gọi on_loss, cwnd giảm 30%
+        Alice->>Server: FILE_CHUNK (chunk 1, gửi lại / retransmit)
         Server->>Bob: FILE_CHUNK (chuyển tiếp lại chunk 1)
+        Bob->>Server: ACK (chunk 1)
+        Server->>Alice: ACK (chuyển tiếp, on_ack(None) vì là mảnh gửi lại)
     end
+
+    Note over Alice, Bob: Pha 3: Hoàn tất & kiểm tra toàn vẹn SHA-256
+    Alice->>Server: FILE_CHUNK (chunk cuối, FLAG_END)
+    Server->>Bob: FILE_CHUNK (chuyển tiếp chunk cuối)
+    Bob->>Bob: Ghép các chunk, tính SHA-256, đối chiếu với checksum trong META
+    Bob->>Bob: Lưu file vào downloads/bob/
+    Bob->>Server: ACK (chunk cuối, gửi sau khi verify và lưu xong)
+    Server->>Alice: ACK (chuyển tiếp, FileSender đánh dấu DONE)
 ```
-
-    Bob->>Server: ACK (xác nhận chunk 1 thành công)
-    Server->>Alice: ACK (chuyển tiếp ACK về Alice, kích hoạt on_ack)
-
-    Note over Alice, Bob: Pha 3: Hoàn tất & Kiểm tra toàn vẹn SHA-256
-    Bob->>Bob: Ghép các chunk, tính mã băm SHA-256 đối chiếu với META
-    Bob->>Bob: Lưu file hoàn chỉnh vào thư mục downloads/bob/
-    Bob->>Server: ACK (hoàn tất phiên)
-    Server->>Alice: ACK (hoàn tất)

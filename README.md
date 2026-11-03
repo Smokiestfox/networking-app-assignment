@@ -1,139 +1,137 @@
 # Networking App Assignment
 
-Ứng dụng cộng tác client-server tự host cho mạng LAN/VPN: đăng nhập, xem danh sách user online, chat chung và chat riêng, truyền file tin cậy, có mã hóa payload. Toàn bộ phần mạng viết bằng raw socket (không dùng Flask, Django hay WebSocket).
+Ứng dụng cộng tác client-server tự host cho mạng LAN/VPN: đăng nhập, quản lý phiên, xem danh sách user online, chat chung (broadcast) và chat riêng (unicast), truyền file tin cậy trên UDP kèm kiểm tra toàn vẹn SHA-256 và điều khiển tắc nghẽn CUBIC, có mã hóa payload. Toàn bộ phần mạng viết bằng raw socket tiêu chuẩn (không sử dụng framework cấp cao như Flask, Django hay WebSocket).
 
-Môn: Network Application Development, Assignment 1.
+Môn học: Network Application Development (MMT-BTL).
 
-## Tính năng dự kiến
+---
 
-- Đăng nhập, server theo dõi user (tên, IP, port) và phát danh sách user online
-- Chat chung (broadcast) và chat riêng (unicast) qua server
-- Truyền file tin cậy trên UDP: chia chunk, sliding window, chỉ gửi lại gói thiếu, kiểm tra SHA-256
-- Heartbeat, timeout, xử lý client thoát đột ngột
-- Mã hóa payload hiện tại bằng Fernet (shared key cho bài thực hành)
-- Giao diện web (HTML + JavaScript thuần): tin nhắn, progress bar, danh sách user
-
-## Cấu trúc thư mục dự kiến
+## 1. Cấu trúc thư mục
 
 ```
 .
-├── client.py            # chạy client
-├── server.py            # chạy server
-├── protocol.py          # packet format, message types
-├── config.py            # host, port, timeout, kích thước window/chunk
-├── users.json           # dữ liệu tài khoản
-├── requirements.txt
-├── static/
-│   └── index.html       # giao diện web
-├── tests/
-└── docs/
-    ├── architecture.md  # kiến trúc hệ thống
-    └── protocol.md      # đặc tả giao thức
+├── client.py            # Client TCP/UDP & giao diện dòng lệnh (CLI)
+├── server.py            # Server quản lý kết nối TCP, định tuyến UDP, relay file và dọn dẹp phiên
+├── protocol.py          # Cấu trúc packet (37-byte header), framing TCP, mã hóa Fernet & helper đóng/mở gói
+├── config.py            # Cấu hình IP, TCP/UDP port, timeout, chunk size, window size
+├── registry.py          # Quản lý danh sách active users thread-safe
+├── congestion.py        # Điều khiển tắc nghẽn CUBIC & bộ ước lượng RTT/RTO (RFC 6298)
+├── file_sender.py       # Phía gửi file: chia chunk 700 B, sliding window CUBIC, selective retransmission
+├── file_receiver.py     # Phía nhận file: ghép mảnh, phản hồi ACK, kiểm tra SHA-256 & lưu file
+├── file_transfers.py    # Luồng worker nền xử lý file I/O không làm nghẽn chat/heartbeat
+├── simulate_demo.py     # Script mô phỏng kiểm tra mạng tự động (hỗ trợ chế độ TCP, UDP, FILE)
+├── users.json           # Dữ liệu tài khoản mẫu phục vụ kiểm thử
+├── requirements.txt     # Danh sách thư viện phụ thuộc
+├── docs/
+│   ├── architecture.md  # Tài liệu kiến trúc hệ thống 3 lớp & luồng đa luồng
+│   └── protocol.md      # Đặc tả giao thức chi tiết, sơ đồ trạng thái & sequence diagrams
+├── tests/               # Bộ kiểm thử tự động (pytest)
+└── tools/
+    └── export_project.py # Công cụ đóng gói mã nguồn phục vụ nộp bài
 ```
 
-## Hướng dẫn chạy và Demo (Week 2: State & Concurrency)
+---
 
-### Cài môi trường (Python 3.11+)
+## 2. Hướng dẫn cài đặt môi trường (Python 3.11+)
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 ```
 
-Trên macOS/Linux dùng `source .venv/bin/activate`. Các lệnh `python` bên dưới chạy trong môi trường đã kích hoạt.
+*(Trên macOS / Linux: dùng `source .venv/bin/activate`)*
 
-### 1. Chạy toàn bộ Unit Tests tự động
+---
 
-Kiểm tra toàn bộ giao thức (protocol), xác thực (authentication) và khả năng xử lý đa luồng (multi-threading):
+## 3. Chạy Unit Tests & Integration Tests
+
+Kiểm tra toàn bộ giao thức (protocol), xác thực, điều khiển tắc nghẽn CUBIC, và truyền file tin cậy:
 
 ```bash
 python -m pytest tests -v
 ```
 
-*(Hoặc chạy riêng từng bài test: `python -m pytest tests/test_protocol.py` hoặc `python -m pytest tests/test_server.py`)*
+Hoặc chạy nhanh chế độ tóm tắt:
+
+```bash
+python -m pytest -q
+```
 
 ---
 
-### 2. Demo tương tác Client – Server (Authentication & Session)
+## 4. Hướng dẫn chạy tương tác Client – Server
 
-**Bước 1: Khởi chạy Server (Terminal 1)**
+### Bước 1: Khởi chạy Server (Terminal 1)
 
 ```bash
 python server.py
 ```
 
-Server sẽ lắng nghe trên cổng `9000` (TCP), quản lý đa luồng và hiển thị bảng Active Users thời gian thực.
+Server sẽ lắng nghe trên cổng `9000` (TCP control channel) và `9001` (UDP data channel), đồng thời ghi log bảng Active Users thời gian thực.
 
-**Bước 2: Khởi chạy Client (Terminal 2)**
+### Bước 2: Khởi chạy các Client (Terminal 2, 3)
 
 ```bash
-# Đăng nhập với tài khoản có trong users.json:
-python client.py alice pass123
+# Đăng nhập với tài khoản mẫu (xem users.json):
+python client.py bob pass123
 
-# Hoặc chạy tương tác để nhập từ bàn phím:
-python client.py
+# Mở thêm terminal khác cho Alice:
+python client.py alice pass123
 ```
 
-- **Luồng xử lý:** Client tự động thực hiện handshake `HELLO -> ACK`, gửi xác thực `AUTH -> AUTH_OK`, và in bảng danh sách user đang online.
-- **Lệnh tương tác:**
-  - `/list` để làm mới danh sách user online.
-  - `/all <text>` chat chung, `/to <user> <text>` chat riêng.
-  - `/send <user> <file>` truyền file ở nền, ví dụ `/send bob "C:\My Files\report.pdf"`.
-  - `/quit` hoặc nhấn `Ctrl+C` để gửi `BYE` và kết thúc phiên an toàn.
+- **Lệnh tương tác trong Client CLI:**
+  - `/list` : Xem danh sách user đang online kèm endpoint.
+  - `/all <nội dung>` : Gửi tin nhắn broadcast đến tất cả mọi người.
+  - `/to <username> <nội dung>` : Gửi tin nhắn unicast riêng cho một người dùng.
+  - `/send <username> <đường dẫn file>` : Truyền file tin cậy ở chế độ nền (hỗ trợ đường dẫn có khoảng trắng được bọc trong dấu ngoặc kép).
+  - `/quit` : Gửi `BYE` ngắt kết nối an toàn và đóng ứng dụng.
+
+**Ví dụ truyền file:**
+
+```text
+alice> /send bob "C:\My Documents\report.pdf"
+alice> /all Vẫn chat bình thường trong lúc file đang truyền!
+```
+
+- File nhận thành công sẽ được lưu tự động trong thư mục `downloads/<username>/`.
+- Màn hình console in tiến độ dạng thanh `[#####.....] 52%`, log thông số `cwnd`/`RTO` mỗi giây, và xác nhận mã băm SHA-256 sau khi phía nhận đã kiểm tra toàn vẹn.
 
 ---
 
-### 3. Demo mô phỏng tải 10–15 Client đồng thời (Concurrency Load Test)
+## 5. Chạy kịch bản mô phỏng kiểm thử tự động (`simulate_demo.py`)
 
-Dùng để kiểm chứng tiêu chí **Rubric 3 (State Tracking)** & **Rubric 4 (Multi-threaded Concurrency)**:
+Script hỗ trợ 3 chế độ kiểm thử mạng:
 
-**Bước 1:** Đảm bảo Server đang chạy ở Terminal 1 (`python server.py`).
+### a) Chế độ TCP – Concurrency Load Test (Rubric 3 & 4)
 
-**Bước 2:** Mở Terminal 2 và kích hoạt script mô phỏng:
+Khởi tạo đồng thời 12 client kết nối, xác thực và duy trì kết nối đồng thời:
 
 ```bash
-python simulate_demo.py --count 12 --duration 10
+python simulate_demo.py --mode tcp --count 12 --duration 10
 ```
 
-- Script sẽ khởi tạo đồng thời 12 luồng client độc lập (`user01` đến `user12`).
-- Toàn bộ 12 client kết nối, xác thực thành công và giữ kết nối trong 10 giây.
-- **Quan sát màn hình Server:** Server sẽ in bảng **Active Users Table** hiển thị đầy đủ 12 client (Username, IP, Active Port) cùng online đồng thời.
-- Sau 10 giây, toàn bộ client tự động gửi `BYE` ngắt kết nối an toàn và dọn dẹp state sạch sẽ.
+### b) Chế độ UDP – Chat Messaging Test (Broadcast & Unicast)
 
-## Tuần 4: reliable UDP file transfer
+Khởi tạo 5 client gửi nhận tin nhắn broadcast và unicast qua server:
 
-Hiện có `file_receiver_demo.py` để Chính phát triển/test FileSender và để Hậu tham khảo đồng bộ. Receiver chính thức `file_receiver.py` thuộc phần Hậu, chưa có trong nhánh này. Mặc định client vẫn chat/gửi được, nhận file chỉ bật khi có module chính thức hoặc chủ động thêm `--demo-receiver`. Xem [giao diện bàn giao cho Hậu](docs/file-receiver-handoff.md).
-
-Chạy `python server.py`, sau đó mở `python client.py bob pass123 --demo-receiver` và `python client.py alice pass123 --demo-receiver` ở hai terminal. Đợi Bob đăng nhập, rồi tại Alice nhập:
-
-```text
-/send bob "C:\My Files\report.pdf"
-/all Vẫn chat được trong lúc gửi file
+```bash
+python simulate_demo.py --mode udp --count 5 --duration 8
 ```
 
-File nhận nằm trong `downloads/bob/`, có UUID trước tên gốc. Console hiện tiến độ, cwnd/RTO mỗi giây, các đợt giảm cửa sổ khi timeout và kết quả SHA-256. Client chỉ báo `[FILE SENT]` sau khi receiver xác minh và lưu file. Gửi unicast, chunk 700 B, file tối đa 45,874,500 B; đường dẫn có dấu cách được hỗ trợ. Nếu Bob chưa có endpoint UDP, sender thử lại metadata đến khi có ACK hoặc hết hạn.
+### c) Chế độ FILE – Reliable UDP File Transfer Demo
 
-Demo tự động dùng server thật và 3 client Alice/Bob/Carol, tạo file nhị phân, kiểm tra SHA-256 và chat đồng thời:
+Khởi tạo 3 client thật (Alice gửi file cho Bob, Carol chat đồng thời liên tục):
 
 ```powershell
-python simulate_demo.py --file-demo --demo-receiver --self-host --size-mb 5 --output downloads/demo-clean
-python simulate_demo.py --file-demo --demo-receiver --self-host --size-mb 1 --loss 0.15 --timeout 240 --output downloads/demo-loss
-python simulate_demo.py --file-demo --demo-receiver --self-host --size-mb 5 --abort-receiver --output downloads/demo-abort
+# 1. Truyền file sạch (không mất gói):
+python simulate_demo.py --mode file --self-host --size-mb 5 --output downloads/demo-clean
+
+# 2. Truyền file trong môi trường giả lập mất gói 15% (SIMULATE_LOSS=0.15):
+python simulate_demo.py --mode file --self-host --size-mb 1 --loss 0.15 --timeout 240 --output downloads/demo-loss
+
+# 3. Phía nhận (Bob) thoát đột ngột không gửi BYE (Alice tự động phát hiện và hủy phiên sạch sẽ):
+python simulate_demo.py --mode file --self-host --size-mb 5 --abort-receiver --output downloads/demo-abort
 ```
 
-Nếu server đã chạy, bỏ `--self-host`. Dùng `--host`, `--port`, `--udp-port` để đổi đích. Với self-host, có thể dùng `--port 0 --udp-port 0` để hệ điều hành chọn cổng trống. Demo ghi kết quả vào `<output>/result.json`, gồm receiver đang dùng; exit code 0 khi các điều kiện demo đạt, 1 khi thất bại. `--abort-receiver` đóng Bob không gửi BYE giữa chừng và kiểm tra Alice báo hủy. Sau khi Hậu bàn giao `file_receiver.py`, bỏ `--demo-receiver` để kiểm chứng module chính thức.
-
-Giả lập mất gói bằng biến môi trường (đặt ở cả terminal Alice và Bob để mất cả dữ liệu lẫn ACK):
-
-```powershell
-$env:SIMULATE_LOSS = "0.15"
-python client.py alice pass123 --demo-receiver
-```
-
-Trên macOS/Linux: `SIMULATE_LOSS=0.15 python client.py alice pass123 --demo-receiver`. Trong demo, `--loss` ghi đè biến môi trường. Mất gói chỉ áp dụng cho file; CUBIC/RTO có thể khiến demo mất gói chạy chậm, vì vậy cho phép timeout dài hơn. Trạng thái không có ACK mới vẫn bị hủy sau 30 s.
-
-```powershell
-python -m pytest -q
-```
-
+Kết quả chi tiết được xuất ra file `<output>/result.json` kiểm tra đầy đủ tính toàn vẹn mã SHA-256, tính cách ly gói tin (Alice không nhận gói file của Bob) và trạng thái các luồng dừng an toàn.

@@ -6,23 +6,12 @@ import random
 import threading
 import time
 from pathlib import Path
-from importlib import import_module
 
+from file_receiver import FileReceiver
 from file_sender import FileSender
 from protocol import ACK, FILE_CHUNK, FILE_META
 
 log = logging.getLogger("client.files")
-
-
-def load_receiver_class(demo=False):
-    """Use production by default; never silently substitute the demo receiver."""
-    module_name = "file_receiver_demo" if demo else "file_receiver"
-    try:
-        return import_module(module_name).FileReceiver
-    except ModuleNotFoundError as exc:
-        if not demo and exc.name == module_name:
-            return None
-        raise  # a missing dependency inside a receiver is an implementation error
 
 
 def loss_rate_from_env(value):
@@ -34,7 +23,7 @@ def loss_rate_from_env(value):
 
 class FileTransfers:
     def __init__(self, username, send_fn, seq, download_dir, *, loss_rate=0,
-                 stats=None, seed=None, demo_receiver=False):
+                 stats=None, seed=None):
         self.username = username
         self.send_fn = send_fn
         self.seq = seq
@@ -45,16 +34,9 @@ class FileTransfers:
         self.events = queue.Queue(maxsize=4096)
         self.stop_evt = threading.Event()
         self.active_evt = threading.Event()
-        receiver_cls = load_receiver_class(demo_receiver)
-        self.receiver = (receiver_cls(self._send, download_dir, username=username,
-                                     seq=seq, on_result=self._received) if receiver_cls else None)
-        self.stats["receiver_backend"] = "demo" if demo_receiver else (
-            "production" if self.receiver is not None else "unavailable")
-        if demo_receiver:
-            log.warning("[%s] DEMO receiver enabled: file_receiver_demo.py (reference only)", username)
-        elif self.receiver is None:
-            log.warning("[%s] file_receiver.py is not available; receiving is disabled. "
-                        "Use --demo-receiver for reference tests. Chat and sending remain available.", username)
+        self.receiver = FileReceiver(self._send, download_dir, username=username,
+                                     seq=seq, on_result=self._received)
+        self.stats["receiver_backend"] = "production"
         self.thread = threading.Thread(target=self._run, name=f"files-{username}", daemon=True)
         self.thread.start()
 

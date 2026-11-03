@@ -2,7 +2,7 @@ import random
 import time
 from protocol import parse_udp
 from file_sender import FileSender
-from file_receiver_demo import FileReceiver
+from file_receiver import FileReceiver
 from protocol import SeqCounter
 
 
@@ -47,7 +47,7 @@ class LossyLink:
             if self.sender:
                 self.sender.on_packet(packet, body)
 
-    def setup_transfer(self, file_path, to_user="bob", username="alice", download_dir="downloads/test", receiver_cls=FileReceiver):
+    def setup_transfer(self, file_path, to_user="bob", username="alice", download_dir="downloads/test", receiver_cls=FileReceiver, controller=None):
         seq_sender = SeqCounter()
         seq_receiver = SeqCounter()
 
@@ -63,7 +63,8 @@ class LossyLink:
             to=to_user,
             username=username,
             send_fn=self.sender_send_fn,
-            seq=seq_sender
+            seq=seq_sender,
+            controller=controller
         )
         return self.sender, self.receiver
 
