@@ -39,9 +39,10 @@ def test_one_mb_file_transfer_with_loss(temp_env):
     src.write_bytes(content)
     expected_hash = hashlib.sha256(content).hexdigest()
 
-    # Điều chỉnh loss_rate = 0.08 và seed khác để chuỗi giả lập mất gói thuận lợi hơn cho CUBIC
+    from congestion import CubicController
+    cc = CubicController(initial_rto=0.08, min_rto=0.03, max_rto=0.3)
     link = LossyLink(loss_rate=0.08, seed=42)
-    sender, receiver = link.setup_transfer(src, download_dir=download_dir)
+    sender, receiver = link.setup_transfer(src, download_dir=download_dir, controller=cc)
 
     success = link.run_transfer(timeout=60.0)
     assert success is True
