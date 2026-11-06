@@ -10,7 +10,7 @@ Môn học: Network Application Development (MMT-BTL).
 
 ```
 .
-├── client.py            # Client TCP/UDP & giao diện dòng lệnh (CLI)
+├── client.py            # ClientSession API, state/callback và CLI tương thích
 ├── server.py            # Server quản lý kết nối TCP, định tuyến UDP, relay file và dọn dẹp phiên
 ├── protocol.py          # Cấu trúc packet (37-byte header), framing TCP, mã hóa Fernet & helper đóng/mở gói
 ├── config.py            # Cấu hình IP, TCP/UDP port, timeout, chunk size, window size
@@ -20,14 +20,14 @@ Môn học: Network Application Development (MMT-BTL).
 ├── file_receiver.py     # Phía nhận file: ghép mảnh, phản hồi ACK, kiểm tra SHA-256 & lưu file
 ├── file_transfers.py    # Luồng worker nền xử lý file I/O không làm nghẽn chat/heartbeat
 ├── simulate_demo.py     # Script mô phỏng kiểm tra mạng tự động (hỗ trợ chế độ TCP, UDP, FILE)
+├── mock_state.json      # Snapshot v1 mẫu để làm UI độc lập với gateway
 ├── users.json           # Dữ liệu tài khoản mẫu phục vụ kiểm thử
 ├── requirements.txt     # Danh sách thư viện phụ thuộc
 ├── docs/
 │   ├── architecture.md  # Tài liệu kiến trúc hệ thống 3 lớp & luồng đa luồng
-│   └── protocol.md      # Đặc tả giao thức chi tiết, sơ đồ trạng thái & sequence diagrams
-├── tests/               # Bộ kiểm thử tự động (pytest)
-└── tools/
-    └── export_project.py # Công cụ đóng gói mã nguồn phục vụ nộp bài
+│   ├── protocol.md      # Đặc tả giao thức chi tiết, sơ đồ trạng thái & sequence diagrams
+│   └── client_api.md    # API client và contract HTTP/JSON tuần 5
+└── tests/               # Bộ kiểm thử tự động (pytest)
 ```
 
 ---
@@ -134,4 +134,46 @@ python simulate_demo.py --mode file --self-host --size-mb 1 --loss 0.15 --timeou
 python simulate_demo.py --mode file --self-host --size-mb 5 --abort-receiver --output downloads/demo-abort
 ```
 
-Kết quả chi tiết được xuất ra file `<output>/result.json` kiểm tra đầy đủ tính toàn vẹn mã SHA-256, tính cách ly gói tin (Alice không nhận gói file của Bob) và trạng thái các luồng dừng an toàn.
+Kết quả chi tiết được xuất ra file `<output>/result.json` kiểm tra đầy đủ tính toàn vẹn mã SHA-256, tính cách ly gói tin (Carol không nhận dữ liệu file gửi riêng cho Bob) và trạng thái các luồng dừng an toàn.
+
+---
+
+## 6. Tuần 5: Client API và điểm tích hợp Web UI
+
+Phần client cung cấp `ClientSession` để gateway dùng chung một phiên TCP/UDP, cùng snapshot JSON cho UI. Xem [API và HTTP contract](docs/client_api.md); Quỳnh có thể phát triển giao diện bằng [mock_state.json](mock_state.json).
+
+```python
+from client import ClientSession
+
+session = ClientSession("alice", "pass123")
+try:
+    if not session.start():
+        raise RuntimeError(session.get_state()["status"]["detail"])
+    session.send_chat("bob", "Chào Bob")
+    print(session.get_state())
+finally:
+    session.close()
+```
+
+- `get_state()` trả bản sao JSON-safe gồm status, users, messages và transfers; không có password/key/socket.
+- `send_file()` trả ID ngay và chạy I/O trong worker. Snapshot có tiến độ gửi/nhận thật, hoàn tất và lỗi; chunk trùng không làm tăng tiến độ nhận.
+- TCP có một reader duy nhất cho USER_LIST/PONG/BYE. Client phát hiện TCP EOF/error hoặc mất phản hồi PING, chuyển status thành `error` và dừng worker.
+- UDP được bind trước AUTH và `udp_port` được khai báo ngay khi đăng nhập, kể cả trong chế độ TCP simulator có dùng heartbeat.
+- Chữ ký `run_client()` và các lệnh `/all`, `/to`, `/send`, `/list`, `/quit` được giữ tương thích.
+
+Sau khi Bình cung cấp `web_gateway.start_gateway(session, host=..., port=...)` và Quỳnh có UI:
+
+```powershell
+python client.py alice pass123 --web-port 8080
+python client.py bob pass123 --web-port 8081
+```
+
+Mỗi tiến trình client có một gateway loopback và cổng riêng. Factory gateway phải trả ngay một handle có `close()`. HTTP chỉ cần `GET /api/state` và `POST /api/chat`; file vẫn gửi từ CLI, progress lên UI. Nếu chưa có module gateway, CLI báo lỗi rõ ràng; bỏ `--web-port` để dùng client hiện tại.
+
+Với server/cổng tùy chỉnh:
+
+```powershell
+python client.py alice pass123 127.0.0.1 9100 --udp-port 9101 --web-port 8080
+```
+
+Mã hóa TCP/config key, sửa log/xác thực endpoint của server và HTML/JavaScript vẫn cần ghép từ phần Hậu/Bình/Quỳnh. Snapshot/gateway còn chạy không thay thế trạng thái kết nối client-server trong `status`.
