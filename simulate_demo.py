@@ -26,9 +26,11 @@ def simulate_single_client(
     hold_duration: float,
     results: dict,
     lock: threading.Lock,
+    server_udp_port=None,
 ):
     """Simulate an independent client: connect -> HELLO -> AUTH -> hold -> BYE."""
     start_time = time.time()
+    sock = udp = None
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(5.0)
@@ -44,7 +46,10 @@ def simulate_single_client(
             return
 
         # 2. AUTH -> AUTH_OK
-        send_json_frame(sock, {"type": "AUTH", "username": username, "password": password})
+        udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        udp.bind(("", 0))
+        send_json_frame(sock, {"type": "AUTH", "username": username, "password": password,
+                               "udp_port": udp.getsockname()[1]})
         auth_resp = recv_json_frame(sock)
 
         if not auth_resp or auth_resp.get("type") != "AUTH_OK":
@@ -66,13 +71,14 @@ def simulate_single_client(
         # 3. Heartbeat is required since Week 3, even for the older load demo.
         from protocol import pack_heartbeat
         from config import HEARTBEAT_INTERVAL
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
-            udp.bind(("", 0))
+        with udp:
             end = time.monotonic() + hold_duration
             seq = 0
             while time.monotonic() < end:
                 seq += 1
-                udp.sendto(pack_heartbeat(username, seq), (host, UDP_PORT if port == TCP_PORT else port + 1))
+                target_port = server_udp_port if server_udp_port is not None else (
+                    UDP_PORT if port == TCP_PORT else port + 1)
+                udp.sendto(pack_heartbeat(username, seq), (host, target_port))
                 time.sleep(min(HEARTBEAT_INTERVAL, max(0, end - time.monotonic())))
 
         # 4. Graceful disconnect with BYE
@@ -88,9 +94,14 @@ def simulate_single_client(
         with lock:
             results[username] = {"status": "ERROR", "error": str(e), "elapsed": time.time() - start_time}
             print(f"  [✗] {username:<10} -> Connection error: {e}")
+    finally:
+        for connection in (sock, udp):
+            if connection is not None:
+                connection.close()
 
 
-def run_simulation(count: int = 12, duration: float = 10.0, host: str = "127.0.0.1", port: int = TCP_PORT):
+def run_simulation(count: int = 12, duration: float = 10.0, host: str = "127.0.0.1",
+                   port: int = TCP_PORT, udp_port=None):
     print("=" * 68)
     print(f"  STARTING CONCURRENT CLIENT SIMULATION ({count} CLIENTS)")
     print(f"  Target Server: {host}:{port}")
@@ -110,7 +121,7 @@ def run_simulation(count: int = 12, duration: float = 10.0, host: str = "127.0.0
     for u in usernames:
         t = threading.Thread(
             target=simulate_single_client,
-            args=(u, default_password, host, port, duration, results, lock),
+            args=(u, default_password, host, port, duration, results, lock, udp_port),
             daemon=True,
         )
         threads.append(t)
@@ -298,7 +309,8 @@ if __name__ == "__main__":
         mode = "file" if args.file_demo else "tcp"
 
     if mode == "tcp":
-        run_simulation(count=args.count, duration=args.duration, host=args.host, port=args.port)
+        run_simulation(count=args.count, duration=args.duration, host=args.host,
+                       port=args.port, udp_port=args.udp_port)
     elif mode == "udp":
         run_udp_simulation(count=args.count if args.count != 12 else 5, duration=args.duration if args.duration != 10.0 else 8.0,
                            host=args.host, port=args.port, udp_port=args.udp_port)

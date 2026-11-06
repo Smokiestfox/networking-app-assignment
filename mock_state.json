@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "revision": 12,
+  "username": "alice",
+  "status": {"state": "connected", "detail": null},
+  "users": ["alice", "bob", "carol"],
+  "messages": [
+    {"id": "2c6c6566-28ca-4e5f-b206-735cf740cfc8", "from": "bob", "to": "*", "text": "Chào mọi người!", "time": 1793880000, "direction": "incoming"},
+    {"id": "5aef69e1-8242-4b12-b8ef-d6132b37ee65", "from": "alice", "to": "bob", "text": "Mình đang gửi file cho bạn.", "time": 1793880010, "direction": "outgoing"}
+  ],
+  "transfers": [
+    {"id": "a23eecc9-495d-4ee7-a214-b93158166090", "direction": "send", "peer": "bob", "filename": "báo cáo.pdf", "size": 1048576, "bytes_transferred": 524288, "progress": 0.5, "status": "transferring", "error": null, "path": null, "checksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "cwnd": 8.0, "rto": 0.2},
+    {"id": "d842dfce-28d5-4328-b58e-cad5ef45b4a2", "direction": "receive", "peer": "carol", "filename": "ghi-chú.txt", "size": 4096, "bytes_transferred": 4096, "progress": 1.0, "status": "completed", "error": null, "path": "downloads/alice/d842dfce28d54328b58ecad5ef45b4a2_ghi-chú.txt", "checksum": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "cwnd": null, "rto": null},
+    {"id": "50806ab1-5b3b-49d2-bcdd-72ab00150122", "direction": "send", "peer": "bob", "filename": "ảnh.png", "size": 20480, "bytes_transferred": 7000, "progress": 0.341796875, "status": "failed", "error": "Peer 'bob' went offline", "path": null, "checksum": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "cwnd": 2.0, "rto": 0.4}
+  ]
+}

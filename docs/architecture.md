@@ -1,8 +1,9 @@
 # System Architecture – Networking App Assignment
 
-> **Scope:** Week 4 – reliable unicast UDP file transfer, alongside chat and heartbeat.
+> **Scope:** Week 5 client API and UI events, built on the Week 4 UDP chat/file transport.
 >
 > Run `server.py` directly: TCP control, UDP routing, file relay and cleanup are integrated.
+> HTTP gateway/UI are integration dependencies owned by Binh/Quynh. Their contract is defined in `docs/client_api.md`; the client already exposes the Python API and `--web-port` hook.
 
 ---
 
@@ -15,12 +16,13 @@ graph TD
     subgraph L3["Layer 3 – Presentation"]
         CLI["CLI (client.py): /all /to /send /list /quit"]
         SIM["Demo Simulator (simulate_demo.py)"]
-        UI["Web UI (Week 5)"]
+        UI["Web UI: users, chat, file progress, status (Quynh)"]
+        GW["Local HTTP gateway: state and chat (Binh)"]
     end
 
     subgraph L2["Layer 2 – Application & State"]
-        CLIENT["client.py (main + heartbeat + listener + file worker)"]
-        FILES["file_transfers.py: event queue and progress logging"]
+        CLIENT["client.py: ClientSession, JSON snapshot and callbacks"]
+        FILES["file_transfers.py: queue, progress/result events, console logging"]
         SENDER["file_sender.py: chunking, window, retransmissions"]
         RECEIVER["Receiver contract: file_receiver.py: FileReceiver, ACK, reassembly, SHA-256 "]
         CC["congestion.py: CUBIC and RTT/RTO"]
@@ -37,7 +39,8 @@ graph TD
 
     CLI --> CLIENT
     SIM --> CLIENT
-    UI -.-> CLIENT
+    UI -.->|"HTTP polling /api/state, POST /api/chat"| GW
+    GW -.->|"same process: get_state(), send_chat()"| CLIENT
     CLIENT <-->|"TCP 9000: HELLO / AUTH / USER_LIST / BYE"| SERVER
     CLIENT <-->|"UDP 9001: heartbeat, chat, file META/CHUNK/ACK"| UDPENG
     CLIENT --> FILES
@@ -55,7 +58,7 @@ graph TD
 
 | Channel     | Port | Purpose                                             | Framing                                                            |
 | ----------- | :--: | --------------------------------------------------- | ------------------------------------------------------------------ |
-| TCP control | 9000 | Handshake, login, logout, on-demand user list       | 4-byte length prefix + JSON                                        |
+| TCP control | 9000 | Handshake, login, logout, user list, PING/PONG | Existing protocol framing; TCP encryption is Hau's Week 5 integration |
 | UDP data    | 9001 | Heartbeat, chat, user lists, reliable unicast files | 37-byte header; encrypted JSON or binary chunks; empty ACK payload |
 
 The TCP session is the source of truth for **who is logged in**. The UDP channel only carries real-time traffic for users who are already active in the registry.
@@ -121,13 +124,14 @@ When a user is alive over TCP but sends no heartbeat for 10 s, the engine unregi
 
 ## 4. Client Architecture
 
-`client.py` runs TCP control on the main thread and three background threads:
+`ClientSession.start()` performs handshake/auth, then runs one TCP reader, one UDP reader, heartbeat/PING and the file worker. The main thread runs the existing CLI; an optional local gateway gets the same session object.
 
 ```mermaid
 flowchart LR
     subgraph Client["client.py (run_client)"]
-        Main["Main thread<br/>TCP: HELLO -> AUTH -> BYE<br/>CLI input loop"]
-        HB["heartbeat thread<br/>sends HEARTBEAT every 2 s"]
+        Main["Main thread<br/>CLI input and session methods"]
+        TCP["Single TCP reader<br/>USER_LIST / PONG / BYE ACK"]
+        HB["heartbeat thread<br/>HEARTBEAT and TCP PING every 2 s"]
         LS["udp-listener thread<br/>prints MSG, join / leave notices"]
         FW["file worker<br/>hashing, META/CHUNK, retries, save, progress"]
         US(("UDP socket<br/>ephemeral port"))
@@ -138,9 +142,10 @@ flowchart LR
     US -->|"recvfrom + parse_udp"| LS
     LS -->|"queue FILE_META / FILE_CHUNK / ACK"| FW
     Main -->|"queue /send user path"| FW
+    Main -->|"control request, then wait for reply event"| TCP
     FW -->|"send_fn(bytes)"| US
     US <-->|"UDP 9001"| S["Server UDP Engine"]
-    Main <-->|"TCP 9000"| T["Server TCP"]
+    TCP <-->|"TCP 9000: one reader, serialized writes"| T["Server TCP"]
 ```
 
 | CLI command             | Action                                    | Channel             |
@@ -151,7 +156,7 @@ flowchart LR
 | `/send <user> <file>` | Queue a reliable unicast file transfer    | UDP via file worker |
 | `/quit`               | Stop threads, send `BYE`, close sockets | TCP                 |
 
-- The client binds an ephemeral UDP port and sends one `HEARTBEAT` immediately after login, before any chat message, so the server learns its UDP address.
+- The client binds an ephemeral UDP port before AUTH and includes `udp_port` in the authenticated request. Heartbeat continues on that same UDP socket after login. Server endpoint hardening remains Binh's integration responsibility.
 - Incoming `USER_LIST` datagrams contain only usernames; the listener compares them with the last known set and prints `[+] name is now online` / `[-] name went offline`.
 - Broadcast needs the explicit `/all` command, so a typo cannot message everyone.
 
@@ -170,11 +175,11 @@ sequenceDiagram
     Note over C,S: 1. TCP handshake and authentication (port 9000)
     C->>S: HELLO
     S-->>C: ACK
-    C->>S: AUTH {username, password}
+    C->>S: AUTH {username, password, udp_port}
     S->>R: authenticate() then register(username, ip, port, conn)
     S-->>C: AUTH_OK {user, users}
 
-    Note over C,U: 2. UDP registration (port 9001)
+    Note over C,U: 2. UDP liveness (socket was bound and udp_port declared before AUTH)
     C->>U: HEARTBEAT {username}
     U->>U: store source address, last_seen = now
     Note over C,U: USER_LIST is pushed on login/logout/timeout
@@ -214,18 +219,18 @@ stateDiagram-v2
     AUTHENTICATING --> DISCONNECTED : AUTH_FAIL
     LOGGED_IN --> LOGGED_IN : chat, heartbeat, background file transfers
     LOGGED_IN --> DISCONNECTING : /quit, Ctrl+C
-    LOGGED_IN --> DISCONNECTING : TCP closure detected on control request
+    LOGGED_IN --> DISCONNECTED : TCP EOF/error or PING timeout
     DISCONNECTING --> DISCONNECTED : BYE acknowledged, sockets closed
     DISCONNECTED --> [*]
 ```
 
 ## 7. Week 4 file worker and lifecycle
 
-`FileTransfers` owns a bounded event queue and one file worker per client. `/send` queues a path immediately. The worker reads/hashes the file, constructs `FileSender`, ticks its CUBIC/RTO state, and dispatches incoming file packets to sender or receiver. The UDP listener only parses and queues file packets, so disk I/O and retransmission waits do not block incoming chat. Heartbeat remains on its own thread.
+`FileTransfers` owns a bounded event queue and one file worker per client. `/send` queues a path and returns a UUID immediately. The worker reads/hashes the file, constructs `FileSender`, ticks CUBIC/RTO, and dispatches incoming file packets. The UDP listener only parses/queues file packets, keeping disk I/O and retries away from incoming chat. The worker publishes JSON progress/result records back to ClientSession.
 
-`FileTransfers` creates `file_receiver.FileReceiver` directly and uses its public APIs `on_packet`, `tick`, `is_receiving`, `close`
+`FileTransfers` creates `file_receiver.FileReceiver` directly and uses its public APIs `on_packet`, `tick`, `close` and `on_result`.
 
-`FileSender` and `FileReceiver` depend on `send_fn(bytes)`, not sockets. They can run on the production UDP socket or a seeded in-memory lossy link. Sender protects its state with an RLock. The file worker serializes receiver updates and ticks. SeqCounter is shared by heartbeat, chat and file traffic.
+`FileSender` and `FileReceiver` depend on `send_fn(bytes)`, not sockets. They can run on the production UDP socket or a seeded in-memory lossy link. Sender protects its state with an RLock. The file worker serializes receiver updates/ticks and derives receive progress from accepted unique chunks plus the existing result callback, without inspecting receiver buffers. SeqCounter is shared by heartbeat, chat and file traffic.
 
 | State              | Transition                                                                          |
 | ------------------ | ----------------------------------------------------------------------------------- |
@@ -237,8 +242,18 @@ stateDiagram-v2
 | Receiver COMPLETE  | Verify SHA-256, save once, ACK completion, retain ACK tombstone 30 s                |
 | Receiver FAILED    | Checksum/save error; no completion ACK; discard buffered bytes                      |
 
-On logout the client stops the file worker before closing UDP, then sends TCP BYE. A `USER_LIST` offline notice cancels sends to that peer; if the notice is lost, the 30 s ACK inactivity limit still applies. Server closes file sessions on either peer leaving or 30 s inactivity; a successful live session otherwise expires by inactivity, since the current protocol has no FILE_DONE packet.
+On logout the client requests TCP BYE, stops its workers and closes sockets. A `USER_LIST` offline notice cancels sends to that peer; if the notice is lost, the 30 s ACK inactivity limit still applies. Server closes file sessions on either peer leaving or 30 s inactivity; a successful live session otherwise expires by inactivity, since the current protocol has no FILE_DONE packet.
 
 Bounds: at most 8 outgoing sends and 16 receiver sessions per client. Files are read/buffered in memory within the uint16 chunk limit; streaming larger files from disk is future work. Completed receiver sessions hold no chunk bytes. No claim is made here about hostile-peer authentication: the pre-existing Week 3 heartbeat/message identity checks need separate hardening.
 
-Run the real three-client demo with python simulate_demo.py --mode file --self-host. This validates the sender against the reference receiver over real sockets.
+Run the real three-client demo with `python simulate_demo.py --mode file --self-host`. This validates the sender and production receiver over real sockets.
+
+## 8. Client state and gateway contract
+
+`ClientSession.get_state()` takes a short state lock and returns a detached JSON-safe copy. It never reads a socket. Snapshot v1 contains status, sorted usernames, up to 100 messages and 50 transfer records. The gateway can serve this snapshot directly; frontend rendering deduplicates by message/transfer UUID. Passwords, keys and sockets are excluded.
+
+Each file record tracks direction, peer, filename, size, acknowledged/accepted bytes, progress, terminal result and errors. Receive duplicates do not increase bytes. Progress 1.0 is reserved for successful verification/save; a failed or unverified file remains below 1.0. A missing local path is reported asynchronously as a failed transfer.
+
+TCP requests are serialized when a caller needs a USER_LIST reply, and all replies are consumed by the control reader. The heartbeat thread only writes PING; PONG or other control replies refresh liveness. EOF, malformed control responses, socket errors or CLIENT_TIMEOUT without control traffic publish an error and stop the session. Browser HTTP availability alone says nothing about network-session health.
+
+The optional CLI flag `--web-port` calls Binh's `start_gateway(session, host="127.0.0.1", port=...)` after AUTH. That factory runs HTTP in the background and returns a closeable handle; the CLI closes it before closing the session. Separate clients use separate HTTP ports. The client reports an unavailable gateway instead of silently claiming the web UI is running. See `docs/client_api.md` and the root `mock_state.json` for the exact shared schema and routes.
