@@ -1,3 +1,4 @@
+import math
 import os
 import socket
 import threading
@@ -16,6 +17,7 @@ from protocol import (
     pack_ack,
     json_obj,
     FLAG_END,
+    MAX_TEXT_LEN,
     Packet,
     SeqCounter,
     HEARTBEAT,
@@ -135,17 +137,11 @@ class CollaborationServer:
         self.log_file_write(banner)
 
     def get_user_udp_addr(self, username: str):
-        """Chỉ trả về địa chỉ UDP đã biết, không dùng cổng TCP thay thế."""
-        with self.udp_addrs_lock:
-            if username in self.udp_addrs:
-                return self.udp_addrs[username]
-
+        """Chỉ trả về địa chỉ UDP đã ràng buộc qua AUTH/registry, không dùng cổng TCP thay thế."""
         with self.registry.lock:
             info = self.registry.active_users.get(username)
-            if info:
-                udp_port = info.get("udp_port")
-                if udp_port:
-                    return (info.get("ip", "127.0.0.1"), int(udp_port))
+            if info is not None and info.get("udp_port") is not None:
+                return (info["ip"], int(info["udp_port"]))
         return None
 
     def forward(self, sender: str, packet) -> list:
@@ -156,6 +152,9 @@ class CollaborationServer:
         Ghi đè trường 'from' thành sender thực tế để bảo đảm tính toàn vẹn.
         Trả về danh sách các username đã nhận gói tin.
         """
+        if not sender or not isinstance(sender, str) or not self.registry.is_active(sender):
+            return []
+
         body = {}
         pkt = None
 
@@ -244,30 +243,31 @@ class CollaborationServer:
         self.log_file_write(text)
 
     def user_by_udp_addr(self, addr):
-        """Tìm username từ địa chỉ UDP nguồn (trong bảng udp_addrs hoặc registry)."""
-        with self.udp_addrs_lock:
-            for user, udp_addr in self.udp_addrs.items():
-                if udp_addr == addr:
-                    return user
+        """Tìm username active theo đúng endpoint UDP (IP TCP, udp_port) đã đăng ký qua AUTH."""
+        if not isinstance(addr, tuple) or len(addr) < 2:
+            return None
+        if isinstance(addr[1], bool) or not isinstance(addr[1], int):
+            return None
+
+        src_ip, src_port = str(addr[0]), addr[1]
         with self.registry.lock:
             for user, info in self.registry.active_users.items():
                 udp_port = info.get("udp_port")
-                if udp_port and (info.get("ip", "127.0.0.1"), int(udp_port)) == addr:
+                if udp_port is not None and info.get("ip") == src_ip and int(udp_port) == src_port:
                     return user
         return None
 
-    def _resolve_sender(self, addr, claimed_sender=None):
-        """Xác định người gửi thực tế từ địa chỉ UDP nguồn và cập nhật last_seen / udp_addrs."""
+    def _resolve_sender(self, addr, claimed_sender=None, require_claimed_match=False):
+        """Xác thực endpoint UDP nguồn (và tên khai báo nếu cần) trước khi cập nhật last_seen / udp_addrs."""
         sender = self.user_by_udp_addr(addr)
-        if sender is None and claimed_sender and self.registry.is_active(claimed_sender):
-            if self.get_user_udp_addr(claimed_sender) is None:
-                sender = claimed_sender
         if sender is None or not self.registry.is_active(sender):
+            return None
+        if require_claimed_match and (not isinstance(claimed_sender, str) or claimed_sender != sender):
             return None
         with self.last_seen_lock:
             self.last_seen[sender] = time.time()
         with self.udp_addrs_lock:
-            self.udp_addrs[sender] = addr
+            self.udp_addrs[sender] = (str(addr[0]), int(addr[1]))
         return sender
 
     @staticmethod
@@ -293,7 +293,7 @@ class CollaborationServer:
         - Tạo / cập nhật phiên msg_id -> (địa chỉ A, địa chỉ B); hỗ trợ gửi lại FILE_META khi mất ACK (8.5.1/8.5.3).
         - Dùng pack_file_meta() có sẵn trong protocol.py để đóng gói và chuyển tiếp tới B.
         """
-        sender = self._resolve_sender(addr, body.get("from"))
+        sender = self._resolve_sender(addr)
         if sender is None:
             self.log_file_write(f"FILE_META from unknown/offline address {addr} dropped")
             return
@@ -603,25 +603,75 @@ class CollaborationServer:
                 self.log_file_write(text)
                 continue
 
-            # 1. Xử lý HEARTBEAT: cập nhật last_seen và udp endpoint
+            # 1. Xử lý HEARTBEAT: xác thực endpoint UDP rồi mới cập nhật last_seen / udp_addrs
             if packet.ptype == HEARTBEAT:
-                username = body.get("username")
-                if username:
-                    with self.last_seen_lock:
-                        self.last_seen[username] = time.time()
-                    with self.udp_addrs_lock:
-                        self.udp_addrs[username] = addr
-                    text = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Received HEARTBEAT from '{username}' ({addr[0]}:{addr[1]})"
-                    self.log_file_write(text)
+                if not isinstance(body, dict):
+                    self.log_file_write(
+                        f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] WARNING: invalid HEARTBEAT body from {addr}; dropped"
+                    )
+                    continue
 
-            # 2. Xử lý MSG: cập nhật last_seen cho sender và forward
+                username = body.get("username")
+                if not isinstance(username, str) or not username.strip():
+                    self.log_file_write(
+                        f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] WARNING: invalid HEARTBEAT username from {addr}; dropped"
+                    )
+                    continue
+
+                sender = self._resolve_sender(
+                    addr,
+                    claimed_sender=username,
+                    require_claimed_match=True,
+                )
+                if sender is None:
+                    self.log_file_write(
+                        f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] WARNING: rejected unauthenticated/spoofed HEARTBEAT for '{username}' from {addr}"
+                    )
+                    continue
+
+                text = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Received HEARTBEAT from '{sender}' ({addr[0]}:{addr[1]})"
+                self.log_file_write(text)
+
+            # 2. Xử lý MSG: kiểm tra định dạng + xác thực endpoint UDP rồi mới cập nhật last_seen và forward
             elif packet.ptype == MSG:
-                sender = body.get("from")
-                if sender:
-                    with self.last_seen_lock:
-                        self.last_seen[sender] = time.time()
-                    with self.udp_addrs_lock:
-                        self.udp_addrs[sender] = addr
+                if not isinstance(body, dict):
+                    self.log_file_write(
+                        f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] WARNING: invalid MSG body from {addr}; dropped"
+                    )
+                    continue
+
+                claimed_from = body.get("from")
+                to = body.get("to")
+                msg_text = body.get("text")
+                msg_time = body.get("time")
+
+                if not (
+                    isinstance(claimed_from, str)
+                    and bool(claimed_from.strip())
+                    and isinstance(to, str)
+                    and bool(to.strip())
+                    and isinstance(msg_text, str)
+                    and 1 <= len(msg_text) <= MAX_TEXT_LEN
+                    and isinstance(msg_time, (int, float))
+                    and not isinstance(msg_time, bool)
+                    and math.isfinite(msg_time)
+                ):
+                    self.log_file_write(
+                        f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] WARNING: invalid MSG fields from {addr}; dropped"
+                    )
+                    continue
+
+                sender = self._resolve_sender(
+                    addr,
+                    claimed_sender=claimed_from,
+                    require_claimed_match=True,
+                )
+                if sender is None:
+                    self.log_file_write(
+                        f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] WARNING: rejected unauthenticated/spoofed MSG from '{claimed_from}' at {addr}"
+                    )
+                    continue
+
                 self.forward(sender, packet)
 
             # 3. Relay file: FILE_META / FILE_CHUNK / ACK (chỉ chuyển tiếp, không lưu mảnh)
@@ -663,19 +713,30 @@ class CollaborationServer:
 
                 # 2. Xử lý Đăng nhập (AUTH / LOGIN): authenticate() -> register() atomic -> AUTH_OK / AUTH_FAIL
                 elif msg_type in ("AUTH", "LOGIN"):
+                    if current_username is not None:
+                        send_json_frame(conn, {
+                            "type": "AUTH_FAIL",
+                            "status": "ERROR",
+                            "message": "Already authenticated on this connection",
+                        })
+                        continue
+
                     username = data.get("username") or data.get("client") or data.get("user")
                     password = data.get("password") or data.get("pass")
                     udp_port = data.get("udp_port")
 
                     if self.registry.authenticate(username, password):
-                        if self.registry.register(username, client_ip, client_port, conn=conn, udp_port=udp_port):
+                        reg_result = self.registry.register(
+                            username, client_ip, client_port, conn=conn, udp_port=udp_port
+                        )
+                        if reg_result:
                             current_username = username
                             now_ts = time.time()
                             with self.last_seen_lock:
                                 self.last_seen[username] = now_ts
-                            if udp_port:
+                            if udp_port is not None:
                                 with self.udp_addrs_lock:
-                                    self.udp_addrs[username] = (client_ip, int(udp_port))
+                                    self.udp_addrs[username] = (str(client_ip), int(udp_port))
 
                             users_list = self.registry.get_user_list()
                             response = {
@@ -692,13 +753,20 @@ class CollaborationServer:
                             self.log_active_users()
                             self.broadcast_user_list()
                         else:
+                            if reg_result.message == "INVALID_UDP_PORT":
+                                fail_msg = "Authentication failed: invalid udp_port"
+                            elif reg_result.message == "UDP_ENDPOINT_IN_USE":
+                                fail_msg = "Authentication failed: UDP endpoint already in use"
+                            else:
+                                fail_msg = f"User '{username}' already logged in"
+
                             response = {
                                 "type": "AUTH_FAIL",
                                 "status": "ERROR",
-                                "message": f"User '{username}' already logged in"
+                                "message": fail_msg
                             }
                             send_json_frame(conn, response)
-                            text = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Sent AUTH_FAIL to {client_id}: User '{username}' already online"
+                            text = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Sent AUTH_FAIL to {client_id}: {fail_msg}"
                             print(text, flush=True)
                             self.log_file_write(text)
                     else:
