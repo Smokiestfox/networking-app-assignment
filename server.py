@@ -2,6 +2,7 @@ import os
 import socket
 import threading
 import time
+import uuid
 from datetime import datetime
 from config import SERVER_HOST, TCP_PORT, UDP_PORT, CLIENT_TIMEOUT, FILE_SESSION_TIMEOUT
 from protocol import (
@@ -20,6 +21,7 @@ from protocol import (
     SeqCounter,
     HEARTBEAT,
     MSG,
+    MAX_TEXT_LEN,
     USER_LIST,
     FILE_META,
     FILE_CHUNK,
@@ -86,6 +88,8 @@ class CollaborationServer:
         self.udp_port = udp_port if udp_port is not None else (UDP_PORT if self.port == TCP_PORT else self.port + 1)
         self.log_file = log_file
         self.log_lock = threading.Lock()
+        self.connection_locks = {}
+        self.connection_locks_guard = threading.Lock()
         self.registry = registry if registry is not None else UserRegistry(users_file=users_file)
         self.client_timeout = client_timeout
         self.cleanup_interval = 0.5  # Chu kỳ quét timeout (giây)
@@ -179,7 +183,6 @@ class CollaborationServer:
         else:
             return []
 
-        # Đảm bảo trường 'from' là sender thực tế và lấy đích đến
         if isinstance(body, dict):
             if sender:
                 body["from"] = sender
@@ -187,7 +190,6 @@ class CollaborationServer:
         else:
             target = "*"
 
-        # Đóng gói lại payload sau khi cập nhật 'from'
         if pkt is not None:
             raw_data = build_udp(pkt.ptype, body if isinstance(body, dict) else {}, pkt.seq,
                                  msg_id=pkt.msg_id, ack=pkt.ack)
@@ -196,16 +198,13 @@ class CollaborationServer:
         else:
             return []
 
-        # Xác định danh sách nhận tin (recipients)
         recipients = []
         if target == "*":
-            # Broadcast: tất cả active users ngoại trừ sender
             active_users = self.registry.get_active_users()
             recipients = [u for u in active_users if u != sender]
             text = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Routing Broadcast from '{sender}' to: {recipients}"
             self.log_file_write(text)
         else:
-            # Unicast: chỉ gửi cho target nếu target đang active
             if self.registry.is_active(target):
                 recipients = [target]
                 text = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Routing Unicast from '{sender}' to '{target}'"
@@ -216,7 +215,6 @@ class CollaborationServer:
                 self.log_file_write(text)
                 return []
 
-        # Gửi gói tin qua UDP socket
         sent_to = []
         for u in recipients:
             addr = self.get_user_udp_addr(u)
@@ -232,6 +230,37 @@ class CollaborationServer:
                 self.log_file_write(text)
 
         return sent_to
+
+    def _send_tcp(self, conn, body):
+        with self.connection_locks_guard:
+            lock = self.connection_locks.get(conn)
+        if lock is None:
+            raise ConnectionError("Connection closed")
+        with lock:
+            send_json_frame(conn, body)
+
+    def forward_chat(self, sender, body):
+        target, text, message_id = body.get("to"), body.get("text"), body.get("id")
+        if (not isinstance(target, str) or not target.strip() or target == sender
+                or not isinstance(text, str) or not 1 <= len(text) <= MAX_TEXT_LEN
+                or not isinstance(message_id, str)):
+            return
+        try:
+            message_id = str(uuid.UUID(message_id))
+        except (ValueError, AttributeError):
+            return
+        outgoing = {"type": "MSG", "id": message_id, "from": sender,
+                    "to": target, "text": text, "time": time.time()}
+        with self.registry.lock:
+            recipients = [(name, info.get("conn")) for name, info in self.registry.active_users.items()
+                          if name != sender and (target == "*" or name == target)]
+        for name, connection in recipients:
+            if connection is None:
+                continue
+            try:
+                self._send_tcp(connection, outgoing)
+            except (OSError, ConnectionError):
+                self.log_file_write(f"Could not send chat to {name}")
 
     # ------------------------------------------------------------------
     # File relay & Session Management (Week 4 - Section 8 & 8.5 of protocol.md)
@@ -254,12 +283,9 @@ class CollaborationServer:
                     return user
         return None
 
-    def _resolve_sender(self, addr, claimed_sender=None):
+    def _resolve_sender(self, addr):
         """Xác định người gửi thực tế từ địa chỉ UDP nguồn và cập nhật last_seen / udp_addrs."""
         sender = self.user_by_udp_addr(addr)
-        if sender is None and claimed_sender and self.registry.is_active(claimed_sender):
-            if self.get_user_udp_addr(claimed_sender) is None:
-                sender = claimed_sender
         if sender is None or not self.registry.is_active(sender):
             return None
         with self.last_seen_lock:
@@ -291,7 +317,7 @@ class CollaborationServer:
         - Tạo / cập nhật phiên msg_id -> (địa chỉ A, địa chỉ B); hỗ trợ gửi lại FILE_META khi mất ACK (8.5.1/8.5.3).
         - Dùng pack_file_meta() có sẵn trong protocol.py để đóng gói và chuyển tiếp tới B.
         """
-        sender = self._resolve_sender(addr, body.get("from"))
+        sender = self._resolve_sender(addr)
         if sender is None:
             self.log_file_write(f"FILE_META from unknown/offline address {addr} dropped")
             return
@@ -608,16 +634,6 @@ class CollaborationServer:
                     text = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Received HEARTBEAT from '{username}' ({addr[0]}:{addr[1]})"
                     self.log_file_write(text)
 
-            # 2. Xử lý MSG: cập nhật last_seen cho sender và forward
-            elif packet.ptype == MSG:
-                sender = body.get("from")
-                if sender:
-                    with self.last_seen_lock:
-                        self.last_seen[sender] = time.time()
-                    with self.udp_addrs_lock:
-                        self.udp_addrs[sender] = addr
-                self.forward(sender, packet)
-
             # 3. Relay file: FILE_META / FILE_CHUNK / ACK (chỉ chuyển tiếp, không lưu mảnh)
             elif packet.ptype == FILE_META:
                 self.handle_file_meta(packet, body, addr)
@@ -628,6 +644,8 @@ class CollaborationServer:
         client_ip, client_port = addr[0], addr[1]
         client_id = f"{client_ip}:{client_port}"
         current_username = None
+        with self.connection_locks_guard:
+            self.connection_locks[conn] = threading.RLock()
 
         try:
             while True:
@@ -650,19 +668,29 @@ class CollaborationServer:
                 # 1. Giữ nguyên tương thích với lệnh HELLO (W1 Handshake)
                 if msg_type == "HELLO":
                     response = {"type": "ACK", "status": "OK"}
-                    send_json_frame(conn, response)
+                    self._send_tcp(conn, response)
                     text = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Sent ACK to {client_id}: {response}"
                     print(text, flush=True)
                     self.log_file_write(text)
 
                 # 2. Xử lý Đăng nhập (AUTH / LOGIN): authenticate() -> register() atomic -> AUTH_OK / AUTH_FAIL
                 elif msg_type in ("AUTH", "LOGIN"):
+                    if current_username is not None:
+                        continue
                     username = data.get("username") or data.get("client") or data.get("user")
                     password = data.get("password") or data.get("pass")
                     udp_port = data.get("udp_port")
 
                     if self.registry.authenticate(username, password):
-                        if self.registry.register(username, client_ip, client_port, conn=conn, udp_port=udp_port):
+                        with self.connection_locks[conn]:
+                            registered = self.registry.register(username, client_ip, client_port, conn=conn, udp_port=udp_port)
+                            if registered:
+                                current_username = username
+                                self._send_tcp(conn, {"type": "AUTH_OK", "status": "OK", "user": username,
+                                                      "users": self.registry.get_user_list(),
+                                                      "user_list": self.registry.get_user_list()})
+                        if registered:
+                            # AUTH_OK was sent while holding the connection lock.
                             current_username = username
                             now_ts = time.time()
                             with self.last_seen_lock:
@@ -679,7 +707,6 @@ class CollaborationServer:
                                 "users": users_list,
                                 "user_list": users_list
                             }
-                            send_json_frame(conn, response)
                             text = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Sent AUTH_OK to {client_id}: User '{username}' logged in successfully"
                             print(text, flush=True)
                             self.log_file_write(text)
@@ -691,7 +718,7 @@ class CollaborationServer:
                                 "status": "ERROR",
                                 "message": f"User '{username}' already logged in"
                             }
-                            send_json_frame(conn, response)
+                            self._send_tcp(conn, response)
                             text = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Sent AUTH_FAIL to {client_id}: User '{username}' already online"
                             print(text, flush=True)
                             self.log_file_write(text)
@@ -701,16 +728,20 @@ class CollaborationServer:
                             "status": "ERROR",
                             "message": "Authentication failed: invalid username or password"
                         }
-                        send_json_frame(conn, response)
+                        self._send_tcp(conn, response)
                         text = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Sent AUTH_FAIL to {client_id}: Invalid credentials for '{username}'"
                         print(text, flush=True)
                         self.log_file_write(text)
+
+                elif msg_type == "MSG":
+                    if current_username is not None:
+                        self.forward_chat(current_username, data)
 
                 # 3. Lệnh Đăng xuất / Ngắt phiên (BYE / LOGOUT): Client chủ động ngắt
                 elif msg_type in ("BYE", "LOGOUT"):
                     response = {"type": "ACK", "status": "BYE"}
                     try:
-                        send_json_frame(conn, response)
+                        self._send_tcp(conn, response)
                     except Exception:
                         pass
                     text = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Client {client_id} sent {msg_type}"
@@ -725,11 +756,11 @@ class CollaborationServer:
                         "status": "OK",
                         "users": self.registry.get_user_list()
                     }
-                    send_json_frame(conn, response)
+                    self._send_tcp(conn, response)
 
                 # 5. PING kiểm tra liveness
                 elif msg_type == "PING":
-                    send_json_frame(conn, {"type": "PONG"})
+                    self._send_tcp(conn, {"type": "PONG"})
 
         except (ConnectionResetError, ConnectionAbortedError):
             text = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Connection reset by {client_id}"
@@ -759,6 +790,8 @@ class CollaborationServer:
                 self.log_active_users()
                 self.broadcast_user_list()
 
+            with self.connection_locks_guard:
+                self.connection_locks.pop(conn, None)
             try:
                 conn.close()
             except OSError:
