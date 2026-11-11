@@ -90,6 +90,8 @@ class CollaborationServer:
         self.client_timeout = client_timeout
         self.cleanup_interval = 0.5  # Chu kỳ quét timeout (giây)
         self.running = False
+        self._stop_lock = threading.Lock()
+        self._stopped = False
 
         # Socket TCP
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -570,7 +572,11 @@ class CollaborationServer:
         while self.running:
             try:
                 data, addr = self.udp_sock.recvfrom(65535)
+                if not self.running:
+                    break
             except ConnectionResetError as e:
+                if not self.running:
+                    break
                 text = (
                     f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
                     f"UDP ConnectionResetError: {e}; continuing recv loop"
@@ -769,15 +775,38 @@ class CollaborationServer:
 
     def stop(self):
         """Dừng server an toàn, đóng cả socket TCP và UDP."""
-        self.running = False
-        try:
-            self.sock.close()
-        except OSError:
-            pass
-        try:
-            self.udp_sock.close()
-        except OSError:
-            pass
+        with self._stop_lock:
+            if self._stopped:
+                return
+            self.running = False
+            self._stopped = True
+
+            for sock in (self.sock, self.udp_sock):
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+
+            with self.registry.lock:
+                connections = [
+                    info["conn"]
+                    for info in self.registry.active_users.values()
+                    if info.get("conn") is not None
+                ]
+
+            for conn in connections:
+                try:
+                    conn.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                try:
+                    conn.close()
+                except OSError:
+                    pass
 
     def close(self):
         self.stop()

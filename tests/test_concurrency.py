@@ -85,8 +85,5 @@ def test_server_concurrency_and_disconnect():
             s.close()
             
     finally:
-        try:
-            server.sock.close()
-        except OSError:
-            pass
+        server.stop()
         server_thread.join(timeout=1.0)
