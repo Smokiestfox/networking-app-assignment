@@ -35,10 +35,7 @@ def test_hello_ack():
         assert bye_resp.get("type") == "ACK"
         sock.close()
     finally:
-        try:
-            server.sock.close()
-        except OSError:
-            pass
+        server.stop()
         server_thread.join(timeout=1.0)
 
 
@@ -70,10 +67,7 @@ def test_login_success():
         assert server.registry.is_active("alice") is False
         sock.close()
     finally:
-        try:
-            server.sock.close()
-        except OSError:
-            pass
+        server.stop()
         server_thread.join(timeout=1.0)
 
 
@@ -97,10 +91,7 @@ def test_login_failure():
         assert server.registry.is_active("alice") is False
         sock.close()
     finally:
-        try:
-            server.sock.close()
-        except OSError:
-            pass
+        server.stop()
         server_thread.join(timeout=1.0)
 
 
@@ -128,10 +119,7 @@ def test_duplicate_login_rejected():
         sock1.close()
         sock2.close()
     finally:
-        try:
-            server.sock.close()
-        except OSError:
-            pass
+        server.stop()
         server_thread.join(timeout=1.0)
 
 
@@ -166,10 +154,7 @@ def test_sequential_logins():
             sock.close()
             time.sleep(0.05)
     finally:
-        try:
-            server.sock.close()
-        except OSError:
-            pass
+        server.stop()
         server_thread.join(timeout=1.0)
 
 
@@ -194,10 +179,7 @@ def test_abrupt_disconnect_unregisters_user():
         time.sleep(0.2)
         assert server.registry.is_active("carol") is False
     finally:
-        try:
-            server.sock.close()
-        except OSError:
-            pass
+        server.stop()
         server_thread.join(timeout=1.0)
 
 
@@ -224,10 +206,7 @@ def test_abrupt_disconnect_recovery():
         assert response.get("type") == "AUTH_OK"
         sock2.close()
     finally:
-        try:
-            server.sock.close()
-        except OSError:
-            pass
+        server.stop()
         server_thread.join(timeout=1.0)
 
 
@@ -271,10 +250,7 @@ def test_concurrent_multithreading():
             assert results[i] is not None, f"Client '{u}' got no response"
             assert results[i].get("type") == "AUTH_OK", f"Client '{u}' expected AUTH_OK, got {results[i]}"
     finally:
-        try:
-            server.sock.close()
-        except OSError:
-            pass
+        server.stop()
         server_thread.join(timeout=1.0)
 
 
@@ -303,10 +279,7 @@ def test_logout_msg_type():
         assert server.registry.is_active("alice") is False
         sock.close()
     finally:
-        try:
-            server.sock.close()
-        except OSError:
-            pass
+        server.stop()
         server_thread.join(timeout=1.0)
 
 

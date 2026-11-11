@@ -45,6 +45,7 @@ class Env:
 
     def close(self):
         self.server.stop()
+        self.thread.join(timeout=1.0)
         for s in self.socks.values():
             s.close()
 

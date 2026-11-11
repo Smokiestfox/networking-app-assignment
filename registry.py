@@ -69,17 +69,29 @@ class UserRegistry:
                 return expected_pass == ""
             return False
 
-    def register(self, username: str, ip: str, port: int, conn=None, sock=None, udp_port: int = None):
+    def register(self, username: str, ip: str, port: int, conn=None, sock=None, udp_port: int = None) -> RegisterResult:
         """
         Đăng ký user vào danh sách Active Users một cách ATOMIC.
         Lưu chính xác IP và active TCP port của client (kèm udp_port nếu có).
         Nếu user đã online (trùng username), từ chối đăng ký và trả về False.
         """
+        if udp_port is not None and (
+            isinstance(udp_port, bool)
+            or not isinstance(udp_port, int)
+            or not 1 <= udp_port <= 65535
+        ):
+            return RegisterResult(False, "INVALID_UDP_PORT")
+
         connection = conn if conn is not None else sock
-        
+
         with self.lock:
             if username in self.active_users:
                 return RegisterResult(False, "ALREADY_LOGGED_IN")
+            if udp_port is not None and any(
+                info.get("ip") == str(ip) and info.get("udp_port") == udp_port
+                for info in self.active_users.values()
+            ):
+                return RegisterResult(False, "UDP_ENDPOINT_IN_USE")
             self.active_users[username] = {
                 "username": username,
                 "ip": str(ip),
@@ -88,7 +100,7 @@ class UserRegistry:
                 "login_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
             if udp_port is not None:
-                self.active_users[username]["udp_port"] = int(udp_port)
+                self.active_users[username]["udp_port"] = udp_port
             return RegisterResult(True, "OK")
 
     def unregister(self, username: str = None, addr: tuple = None) -> bool:
