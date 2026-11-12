@@ -8,6 +8,7 @@ from config import SERVER_HOST, TCP_PORT, UDP_PORT, CLIENT_TIMEOUT, FILE_SESSION
 from protocol import (
     recv_json_frame,
     send_json_frame,
+    mask_credentials,
     parse_udp,
     build_udp,
     pack_msg,
@@ -694,7 +695,8 @@ class CollaborationServer:
                     self.log_file_write(text)
                     break
 
-                text = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Received from {client_id}: {data}"
+                safe_data = mask_credentials(data)
+                text = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Received from {client_id}: {safe_data}"
                 print(text, flush=True)
                 self.log_file_write(text)
 
