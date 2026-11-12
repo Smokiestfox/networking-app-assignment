@@ -1,10 +1,11 @@
 import json
+import os
 import struct
 import uuid
 import threading
 import time
 from dataclasses import dataclass
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 from config import FERNET_KEY
 
 MAGIC = b"NP"
@@ -35,7 +36,15 @@ REQUIRED_KEYS = {
 
 HEADER = struct.Struct("!2sBBB II 16s H H I") # thêm một số nguyên I cho ack
 FRAME_HEADER = struct.Struct("!I")  # 4 bytes số nguyên không dấu (uint32) Big-Endian
-cipher = Fernet(FERNET_KEY.encode())
+
+def get_cipher(key: str = None) -> Fernet:
+    if key is None:
+        key = os.getenv("FERNET_KEY") or FERNET_KEY
+    if isinstance(key, str):
+        key = key.encode("utf-8")
+    return Fernet(key)
+
+cipher = get_cipher() #cipher mặc định dùng chung
 
 
 @dataclass
@@ -110,39 +119,64 @@ def recv_exact(sock, num_bytes: int):
         buf.extend(chunk)
     return bytes(buf)
 
-def send_frame(sock, data: bytes) -> None:
-    header = FRAME_HEADER.pack(len(data))
-    payload = header + data
-    if hasattr(sock, "sendall"):
-        sock.sendall(payload)
-    else:
-        sock.write(payload)
+def send_frame(sock, data: bytes, lock=None, cipher = None) -> None:
+    c = cipher if cipher is not None else get_cipher()
 
-def recv_frame(sock):
+    ciphertext = c.encrypt(data)
+
+    header = FRAME_HEADER.pack(len(ciphertext))
+    payload = header + ciphertext
+
+    def _do_send():
+        if hasattr(sock, "sendall"):
+            sock.sendall(payload)
+        else:
+            sock.write(payload)
+
+    if lock:
+        with lock:
+            _do_send()
+    else:
+        _do_send()
+
+def recv_frame(sock, cipher = None):
     header_bytes = recv_exact(sock, FRAME_HEADER.size)
     if header_bytes is None:
         return None
     length = FRAME_HEADER.unpack(header_bytes)[0]
     if length == 0:
         return b""
-    payload = recv_exact(sock, length)
-    if payload is None:
+    ciphertext = recv_exact(sock, length)
+    if ciphertext is None:
         raise ConnectionResetError("Mất kết nối khi đang nhận phần payload của khung")
-    return payload
 
-def send_json_frame(sock, obj) -> None:
-    send_frame(sock, json_bytes(obj))
+    c = cipher if cipher is not None else get_cipher()
+    try:
+        return c.decrypt(ciphertext)
+    except InvalidToken as exc:
+        raise ConnectionResetError("Dữ liệu TCP bị sửa đổi hoặc sai khóa mã hóa") from exc    
 
-def recv_json_frame(sock):
-    raw = recv_frame(sock)
+def send_json_frame(sock, obj, lock = None, cipher = None) -> None:
+    send_frame(sock, json_bytes(obj), lock = lock, cipher = cipher)
+
+def recv_json_frame(sock, cipher = None):
+    raw = recv_frame(sock, cipher = cipher)
     if raw is None:
         return None
     return json_obj(raw)
 
+def mask_credentials(data):
+    if not isinstance(data, dict):
+        return data
+    safe_copy = dict(data)
+    for key in ("password", "pass"):
+        if key in safe_copy:
+            safe_copy[key] = "***"
+    return safe_copy
+
 
  
 class SeqCounter:
-    """Thread-safe, monotonically increasing sequence number (starts at 1)."""
  
     def __init__(self):
         self._value = 0
@@ -156,7 +190,6 @@ class SeqCounter:
  
 def build_udp(ptype: int, body: dict, seq: int, msg_id=None, ack: int = 0,
               encrypt: bool = True) -> bytes:
-    """Serialize `body` as JSON and wrap it into a full UDP datagram (37-byte header + payload)."""
     packet = Packet(
         ptype=ptype,
         seq=seq,
@@ -171,7 +204,6 @@ def build_udp(ptype: int, body: dict, seq: int, msg_id=None, ack: int = 0,
  
  
 def parse_udp(data: bytes):
-    """Parse a datagram. Returns (Packet, body_dict). Raises ValueError for any invalid datagram."""
     if len(data) < HEADER.size:
         raise ValueError("short packet")
     declared = HEADER.unpack(data[:HEADER.size])[-1]       # payload length field
@@ -200,7 +232,6 @@ def parse_udp(data: bytes):
  
  
 def pack_msg(to: str, sender: str, text: str, seq: int, **kwargs) -> bytes:
-    """MSG: `to` is "*" (broadcast) or a username (unicast). The server overwrites `from`."""
     if not text or len(text) > MAX_TEXT_LEN:
         raise ValueError(f"text must be 1..{MAX_TEXT_LEN} characters")
     body = {"to": to, "from": sender, "text": text, "time": int(time.time())}
@@ -208,12 +239,10 @@ def pack_msg(to: str, sender: str, text: str, seq: int, **kwargs) -> bytes:
  
  
 def pack_heartbeat(username: str, seq: int, **kwargs) -> bytes:
-    """HEARTBEAT: periodic liveness signal (client -> server)."""
     return build_udp(HEARTBEAT, {"username": username}, seq, **kwargs)
  
  
 def pack_user_list(users, seq: int, **kwargs) -> bytes:
-    """USER_LIST: list of online usernames (server -> clients)."""
     return build_udp(USER_LIST, {"users": list(users)}, seq, **kwargs)
 
 def pack_file_meta(to: str, sender: str, filename: str, size: int, chunks: int, checksum: str, seq: int, msg_id: uuid.UUID = None, **kwargs) -> bytes:
