@@ -1,3 +1,4 @@
+import math
 import os
 import socket
 import threading
@@ -8,6 +9,7 @@ from config import SERVER_HOST, TCP_PORT, UDP_PORT, CLIENT_TIMEOUT, FILE_SESSION
 from protocol import (
     recv_json_frame,
     send_json_frame,
+    mask_credentials,
     parse_udp,
     build_udp,
     pack_msg,
@@ -17,6 +19,7 @@ from protocol import (
     pack_ack,
     json_obj,
     FLAG_END,
+    MAX_TEXT_LEN,
     Packet,
     SeqCounter,
     HEARTBEAT,
@@ -94,6 +97,8 @@ class CollaborationServer:
         self.client_timeout = client_timeout
         self.cleanup_interval = 0.5  # Chu kỳ quét timeout (giây)
         self.running = False
+        self._stop_lock = threading.Lock()
+        self._stopped = False
 
         # Socket TCP
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -137,17 +142,11 @@ class CollaborationServer:
         self.log_file_write(banner)
 
     def get_user_udp_addr(self, username: str):
-        """Chỉ trả về địa chỉ UDP đã biết, không dùng cổng TCP thay thế."""
-        with self.udp_addrs_lock:
-            if username in self.udp_addrs:
-                return self.udp_addrs[username]
-
+        """Chỉ trả về địa chỉ UDP đã ràng buộc qua AUTH/registry, không dùng cổng TCP thay thế."""
         with self.registry.lock:
             info = self.registry.active_users.get(username)
-            if info:
-                udp_port = info.get("udp_port")
-                if udp_port:
-                    return (info.get("ip", "127.0.0.1"), int(udp_port))
+            if info is not None and info.get("udp_port") is not None:
+                return (info["ip"], int(info["udp_port"]))
         return None
 
     def forward(self, sender: str, packet) -> list:
@@ -158,6 +157,9 @@ class CollaborationServer:
         Ghi đè trường 'from' thành sender thực tế để bảo đảm tính toàn vẹn.
         Trả về danh sách các username đã nhận gói tin.
         """
+        if not sender or not isinstance(sender, str) or not self.registry.is_active(sender):
+            return []
+
         body = {}
         pkt = None
 
@@ -271,27 +273,31 @@ class CollaborationServer:
         self.log_file_write(text)
 
     def user_by_udp_addr(self, addr):
-        """Tìm username từ địa chỉ UDP nguồn (trong bảng udp_addrs hoặc registry)."""
-        with self.udp_addrs_lock:
-            for user, udp_addr in self.udp_addrs.items():
-                if udp_addr == addr:
-                    return user
+        """Tìm username active theo đúng endpoint UDP (IP TCP, udp_port) đã đăng ký qua AUTH."""
+        if not isinstance(addr, tuple) or len(addr) < 2:
+            return None
+        if isinstance(addr[1], bool) or not isinstance(addr[1], int):
+            return None
+
+        src_ip, src_port = str(addr[0]), addr[1]
         with self.registry.lock:
             for user, info in self.registry.active_users.items():
                 udp_port = info.get("udp_port")
-                if udp_port and (info.get("ip", "127.0.0.1"), int(udp_port)) == addr:
+                if udp_port is not None and info.get("ip") == src_ip and int(udp_port) == src_port:
                     return user
         return None
 
-    def _resolve_sender(self, addr):
-        """Xác định người gửi thực tế từ địa chỉ UDP nguồn và cập nhật last_seen / udp_addrs."""
+    def _resolve_sender(self, addr, claimed_sender=None, require_claimed_match=False):
+        """Xác thực endpoint UDP nguồn (và tên khai báo nếu cần) trước khi cập nhật last_seen / udp_addrs."""
         sender = self.user_by_udp_addr(addr)
         if sender is None or not self.registry.is_active(sender):
+            return None
+        if require_claimed_match and (not isinstance(claimed_sender, str) or claimed_sender != sender):
             return None
         with self.last_seen_lock:
             self.last_seen[sender] = time.time()
         with self.udp_addrs_lock:
-            self.udp_addrs[sender] = addr
+            self.udp_addrs[sender] = (str(addr[0]), int(addr[1]))
         return sender
 
     @staticmethod
@@ -596,7 +602,11 @@ class CollaborationServer:
         while self.running:
             try:
                 data, addr = self.udp_sock.recvfrom(65535)
+                if not self.running:
+                    break
             except ConnectionResetError as e:
+                if not self.running:
+                    break
                 text = (
                     f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
                     f"UDP ConnectionResetError: {e}; continuing recv loop"
@@ -623,16 +633,76 @@ class CollaborationServer:
                 self.log_file_write(text)
                 continue
 
-            # 1. Xử lý HEARTBEAT: cập nhật last_seen và udp endpoint
+            # 1. Xử lý HEARTBEAT: xác thực endpoint UDP rồi mới cập nhật last_seen / udp_addrs
             if packet.ptype == HEARTBEAT:
+                if not isinstance(body, dict):
+                    self.log_file_write(
+                        f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] WARNING: invalid HEARTBEAT body from {addr}; dropped"
+                    )
+                    continue
+
                 username = body.get("username")
-                if username:
-                    with self.last_seen_lock:
-                        self.last_seen[username] = time.time()
-                    with self.udp_addrs_lock:
-                        self.udp_addrs[username] = addr
-                    text = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Received HEARTBEAT from '{username}' ({addr[0]}:{addr[1]})"
-                    self.log_file_write(text)
+                if not isinstance(username, str) or not username.strip():
+                    self.log_file_write(
+                        f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] WARNING: invalid HEARTBEAT username from {addr}; dropped"
+                    )
+                    continue
+
+                sender = self._resolve_sender(
+                    addr,
+                    claimed_sender=username,
+                    require_claimed_match=True,
+                )
+                if sender is None:
+                    self.log_file_write(
+                        f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] WARNING: rejected unauthenticated/spoofed HEARTBEAT for '{username}' from {addr}"
+                    )
+                    continue
+
+                text = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Received HEARTBEAT from '{sender}' ({addr[0]}:{addr[1]})"
+                self.log_file_write(text)
+
+            # 2. Xử lý MSG: kiểm tra định dạng + xác thực endpoint UDP rồi mới cập nhật last_seen và forward
+            elif packet.ptype == MSG:
+                if not isinstance(body, dict):
+                    self.log_file_write(
+                        f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] WARNING: invalid MSG body from {addr}; dropped"
+                    )
+                    continue
+
+                claimed_from = body.get("from")
+                to = body.get("to")
+                msg_text = body.get("text")
+                msg_time = body.get("time")
+
+                if not (
+                    isinstance(claimed_from, str)
+                    and bool(claimed_from.strip())
+                    and isinstance(to, str)
+                    and bool(to.strip())
+                    and isinstance(msg_text, str)
+                    and 1 <= len(msg_text) <= MAX_TEXT_LEN
+                    and isinstance(msg_time, (int, float))
+                    and not isinstance(msg_time, bool)
+                    and math.isfinite(msg_time)
+                ):
+                    self.log_file_write(
+                        f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] WARNING: invalid MSG fields from {addr}; dropped"
+                    )
+                    continue
+
+                sender = self._resolve_sender(
+                    addr,
+                    claimed_sender=claimed_from,
+                    require_claimed_match=True,
+                )
+                if sender is None:
+                    self.log_file_write(
+                        f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] WARNING: rejected unauthenticated/spoofed MSG from '{claimed_from}' at {addr}"
+                    )
+                    continue
+
+                self.forward(sender, packet)
 
             # 3. Relay file: FILE_META / FILE_CHUNK / ACK (chỉ chuyển tiếp, không lưu mảnh)
             elif packet.ptype == FILE_META:
@@ -656,7 +726,8 @@ class CollaborationServer:
                     self.log_file_write(text)
                     break
 
-                text = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Received from {client_id}: {data}"
+                safe_data = mask_credentials(data)
+                text = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Received from {client_id}: {safe_data}"
                 print(text, flush=True)
                 self.log_file_write(text)
 
@@ -676,50 +747,61 @@ class CollaborationServer:
                 # 2. Xử lý Đăng nhập (AUTH / LOGIN): authenticate() -> register() atomic -> AUTH_OK / AUTH_FAIL
                 elif msg_type in ("AUTH", "LOGIN"):
                     if current_username is not None:
+                        self._send_tcp(conn, {
+                            "type": "AUTH_FAIL",
+                            "status": "ERROR",
+                            "message": "Already authenticated on this connection",
+                        })
                         continue
+
                     username = data.get("username") or data.get("client") or data.get("user")
                     password = data.get("password") or data.get("pass")
                     udp_port = data.get("udp_port")
 
                     if self.registry.authenticate(username, password):
                         with self.connection_locks[conn]:
-                            registered = self.registry.register(username, client_ip, client_port, conn=conn, udp_port=udp_port)
-                            if registered:
+                            reg_result = self.registry.register(
+                                username, client_ip, client_port, conn=conn, udp_port=udp_port
+                            )
+                            if reg_result:
                                 current_username = username
-                                self._send_tcp(conn, {"type": "AUTH_OK", "status": "OK", "user": username,
-                                                      "users": self.registry.get_user_list(),
-                                                      "user_list": self.registry.get_user_list()})
-                        if registered:
-                            # AUTH_OK was sent while holding the connection lock.
-                            current_username = username
-                            now_ts = time.time()
-                            with self.last_seen_lock:
-                                self.last_seen[username] = now_ts
-                            if udp_port:
-                                with self.udp_addrs_lock:
-                                    self.udp_addrs[username] = (client_ip, int(udp_port))
+                                now_ts = time.time()
+                                with self.last_seen_lock:
+                                    self.last_seen[username] = now_ts
+                                if udp_port is not None:
+                                    with self.udp_addrs_lock:
+                                        self.udp_addrs[username] = (str(client_ip), int(udp_port))
 
-                            users_list = self.registry.get_user_list()
-                            response = {
-                                "type": "AUTH_OK",
-                                "status": "OK",
-                                "user": username,
-                                "users": users_list,
-                                "user_list": users_list
-                            }
+                                users_list = self.registry.get_user_list()
+                                response = {
+                                    "type": "AUTH_OK",
+                                    "status": "OK",
+                                    "user": username,
+                                    "users": users_list,
+                                    "user_list": users_list
+                                }
+                                self._send_tcp(conn, response)
+                        if reg_result:
                             text = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Sent AUTH_OK to {client_id}: User '{username}' logged in successfully"
                             print(text, flush=True)
                             self.log_file_write(text)
                             self.log_active_users()
                             self.broadcast_user_list()
                         else:
+                            if reg_result.message == "INVALID_UDP_PORT":
+                                fail_msg = "Authentication failed: invalid udp_port"
+                            elif reg_result.message == "UDP_ENDPOINT_IN_USE":
+                                fail_msg = "Authentication failed: UDP endpoint already in use"
+                            else:
+                                fail_msg = f"User '{username}' already logged in"
+
                             response = {
                                 "type": "AUTH_FAIL",
                                 "status": "ERROR",
-                                "message": f"User '{username}' already logged in"
+                                "message": fail_msg
                             }
                             self._send_tcp(conn, response)
-                            text = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Sent AUTH_FAIL to {client_id}: User '{username}' already online"
+                            text = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Sent AUTH_FAIL to {client_id}: {fail_msg}"
                             print(text, flush=True)
                             self.log_file_write(text)
                     else:
@@ -802,15 +884,38 @@ class CollaborationServer:
 
     def stop(self):
         """Dừng server an toàn, đóng cả socket TCP và UDP."""
-        self.running = False
-        try:
-            self.sock.close()
-        except OSError:
-            pass
-        try:
-            self.udp_sock.close()
-        except OSError:
-            pass
+        with self._stop_lock:
+            if self._stopped:
+                return
+            self.running = False
+            self._stopped = True
+
+            for sock in (self.sock, self.udp_sock):
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+
+            with self.registry.lock:
+                connections = [
+                    info["conn"]
+                    for info in self.registry.active_users.values()
+                    if info.get("conn") is not None
+                ]
+
+            for conn in connections:
+                try:
+                    conn.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                try:
+                    conn.close()
+                except OSError:
+                    pass
 
     def close(self):
         self.stop()

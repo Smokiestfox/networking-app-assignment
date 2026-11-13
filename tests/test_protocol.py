@@ -93,3 +93,82 @@ def test_reject_truncated_trailing_and_tampered_file_datagrams():
     for broken in (raw[:-1], raw + b"extra"):
         with pytest.raises(ValueError):
             protocol.parse_udp(broken)
+
+# ==========================================
+# CÁC TEST CASES MỚI CHO TCP ENCRYPTION (W6-03)
+# ==========================================
+
+def test_tcp_frame_wire_is_encrypted():
+    """Kiểm tra: Dữ liệu truyền trên socket không chứa plaintext JSON hay password."""
+    import socket
+    s1, s2 = socket.socketpair()
+    try:
+        secret_payload = {"user": "alice", "password": "super_secret_password_123"}
+        protocol.send_json_frame(s1, secret_payload)
+        
+        # Đọc trực tiếp byte thô từ socket mạng
+        raw_wire = s2.recv(1024)
+        
+        # 1. 4 bytes đầu là độ dài uint32
+        declared_len = protocol.FRAME_HEADER.unpack(raw_wire[:4])[0]
+        assert declared_len == len(raw_wire[4:])
+        
+        # 2. Không được để lộ plaintext trên đường truyền
+        assert b"super_secret_password_123" not in raw_wire
+        assert b"alice" not in raw_wire
+    finally:
+        s1.close()
+        s2.close()
+
+
+def test_tcp_frame_wrong_key_closes_connection():
+    """Kiểm tra: Sai khóa Fernet thì recv_frame phải ném ConnectionResetError (đóng kết nối)."""
+    import socket
+    s1, s2 = socket.socketpair()
+    key_alice = Fernet.generate_key()
+    key_bob = Fernet.generate_key()  # Khóa khác hoàn toàn
+    cipher_alice = Fernet(key_alice)
+    cipher_bob = Fernet(key_bob)
+    try:
+        protocol.send_json_frame(s1, {"msg": "hello"}, cipher=cipher_alice)
+        with pytest.raises(ConnectionResetError, match="Dữ liệu TCP bị sửa đổi hoặc sai khóa mã hóa"):
+            protocol.recv_json_frame(s2, cipher=cipher_bob)
+    finally:
+        s1.close()
+        s2.close()
+
+
+def test_tcp_frame_tampered_ciphertext_closes_connection():
+    """Kiểm tra: Dữ liệu mã hóa bị sửa/can thiệp trên đường truyền thì kết nối bị ngắt."""
+    import socket
+    s1, s2 = socket.socketpair()
+    try:
+        protocol.send_json_frame(s1, {"action": "transfer", "amount": 100})
+        raw_wire = bytearray(s2.recv(1024))
+        
+        # Giả lập kẻ tấn công cố tình sửa đổi 1 byte trong phần ciphertext
+        raw_wire[10] ^= 0xFF
+        
+        s3, s4 = socket.socketpair()
+        try:
+            s3.sendall(raw_wire)
+            with pytest.raises(ConnectionResetError, match="Dữ liệu TCP bị sửa đổi hoặc sai khóa mã hóa"):
+                protocol.recv_json_frame(s4)
+        finally:
+            s3.close()
+            s4.close()
+    finally:
+        s1.close()
+        s2.close()
+
+
+def test_mask_credentials_masks_passwords():
+    """Kiểm tra hàm che thông tin nhạy cảm khi log."""
+    data = {"user": "bob", "password": "mypassword", "pass": "secret", "other": 123}
+    masked = protocol.mask_credentials(data)
+    assert masked["password"] == "***"
+    assert masked["pass"] == "***"
+    assert masked["user"] == "bob"
+    assert masked["other"] == 123
+    # Đảm bảo dictionary gốc không bị thay đổi ngoài ý muốn
+    assert data["password"] == "mypassword"

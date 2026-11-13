@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Networking App - Client Dashboard (W6-05)</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Header: Thông tin User & Trạng thái kết nối -->
+        <header>
+            <h1>🚀 Networking App Dashboard</h1>
+            <div class="user-status-info">
+                User: <strong id="current-user">Loading...</strong> | 
+                Status: <span id="connection-status" class="status-badge status-disconnected">disconnected</span>
+            </div>
+        </header>
+
+        <!-- Sidebar: Danh sách User Online -->
+        <aside>
+            <div class="card">
+                <h2>🟢 Online Users (<span id="user-count">0</span>)</h2>
+                <ul id="users-list" class="user-list">
+                    <li>Đang tải...</li>
+                </ul>
+            </div>
+        </aside>
+
+        <!-- Main Content: Chat & File Transfers -->
+        <main>
+            <!-- Chat Section (Hỗ trợ Broadcast & Unicast) -->
+            <div class="card">
+                <h2>💬 Chat Room</h2>
+                <div id="chat-box" class="chat-box"></div>
+                <form id="chat-form" class="chat-form">
+                    <select id="chat-to">
+                        <option value="*">Broadcast (*)</option>
+                    </select>
+                    <input type="text" id="chat-text" placeholder="Nhập nội dung tin nhắn..." required autocomplete="off">
+                    <button type="submit">Gửi</button>
+                </form>
+            </div>
+
+            <!-- File Transfers Section (Tiến độ, trạng thái, cwnd/rto) -->
+            <div class="card">
+                <h2>📁 File Transfers</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Peer</th>
+                            <th>File Name</th>
+                            <th>Direction</th>
+                            <th>Progress</th>
+                            <th>Status</th>
+                            <th>Cwnd / RTO</th>
+                        </tr>
+                    </thead>
+                    <tbody id="transfers-tbody">
+                        <tr><td colspan="6" style="text-align: center;">Chưa có tệp truyền nào.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </main>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

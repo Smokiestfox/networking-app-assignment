@@ -172,29 +172,35 @@ class TestMessaging(unittest.TestCase):
 
     def test_server_heartbeat_processing(self):
         """
-        Test 7: Nhận HEARTBEAT trên cổng UDP và cập nhật last_seen
+        Test 7: Nhận HEARTBEAT trên cổng UDP từ endpoint đã đăng ký và cập nhật last_seen
         """
         test_udp_port = 9207
         server = CollaborationServer(host="127.0.0.1", port=9206, udp_port=test_udp_port)
         server_thread = threading.Thread(target=server.run, daemon=True)
-        server_thread.start()
-        time.sleep(0.1)
+        client_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
         try:
-            client_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            hb_pkt = pack_heartbeat(username="alice", seq=1)
-            
+            server_thread.start()
+            time.sleep(0.1)
+
+            client_sock.bind(("127.0.0.1", 0))
+            client_port = client_sock.getsockname()[1]
+            self.assertTrue(
+                server.registry.register("alice", "127.0.0.1", client_port, udp_port=client_port)
+            )
+
             before_send = time.time()
-            client_sock.sendto(hb_pkt, ("127.0.0.1", test_udp_port))
+            client_sock.sendto(pack_heartbeat(username="alice", seq=1), ("127.0.0.1", test_udp_port))
             time.sleep(0.2)
 
             self.assertIn("alice", server.last_seen)
             self.assertGreaterEqual(server.last_seen["alice"], before_send - 0.5)
-            self.assertIn("alice", server.udp_addrs)
-            client_sock.close()
+            self.assertEqual(server.udp_addrs["alice"], ("127.0.0.1", client_port))
         finally:
             server.stop()
-            server_thread.join(timeout=1.0)
+            if server_thread.ident is not None:
+                server_thread.join(timeout=1.0)
+            client_sock.close()
 
     def test_server_cleanup_loop_and_broadcast_user_list(self):
         """
