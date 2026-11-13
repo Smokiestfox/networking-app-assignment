@@ -11,11 +11,12 @@ import queue
 import socket
 import threading
 import time
+import uuid
 
 from config import SERVER_HOST, TCP_PORT, UDP_PORT, HEARTBEAT_INTERVAL, CLIENT_TIMEOUT
 from file_transfers import FileTransfers, loss_rate_from_env
-from protocol import (ACK, FILE_CHUNK, FILE_META, MSG, USER_LIST, SeqCounter,
-                      pack_heartbeat, pack_msg, parse_udp, recv_json_frame, send_json_frame)
+from protocol import (ACK, FILE_CHUNK, FILE_META, USER_LIST, SeqCounter, MAX_TEXT_LEN,
+                      pack_heartbeat, parse_udp, recv_json_frame, send_json_frame)
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] [%(levelname)s] %(message)s",
                     datefmt="%H:%M:%S")
@@ -136,8 +137,8 @@ class ClientSession:
             for name in sorted(left):
                 print(f"\n  [-] {name} went offline", flush=True)
 
-    def _message(self, packet, body, direction):
-        message = {"id": str(packet.msg_id), "from": body["from"], "to": body["to"],
+    def _message(self, message_id, body, direction):
+        message = {"id": str(message_id), "from": body["from"], "to": body["to"],
                    "text": body["text"], "time": body["time"], "direction": direction}
         with self._state_lock:
             if message["id"] in self._message_ids:
@@ -254,6 +255,10 @@ class ClientSession:
                     self._set_users(users)
                     self._users_response = deepcopy(users)
                     self._users_reply.set()
+                elif body.get("type") == "MSG":
+                    if (all(isinstance(body.get(k), str) for k in ("id", "from", "to", "text"))
+                            and isinstance(body.get("time"), (int, float))):
+                        self._message(body["id"], body, "incoming")
                 elif body.get("type") == "ACK" and body.get("status") == "BYE":
                     self._bye_reply.set()
         except Exception as exc:
@@ -278,12 +283,7 @@ class ClientSession:
                 continue
             try:
                 packet, body = parse_udp(raw)
-                if packet.ptype == MSG:
-                    if (not isinstance(body.get("from"), str) or not isinstance(body.get("to"), str)
-                            or not isinstance(body.get("text"), str) or not isinstance(body.get("time"), (int, float))):
-                        continue
-                    self._message(packet, body, "incoming")
-                elif packet.ptype == USER_LIST:
+                if packet.ptype == USER_LIST:
                     if isinstance(body.get("users"), list):
                         self._set_users(body["users"])
                 elif packet.ptype in (FILE_META, FILE_CHUNK, ACK):
@@ -314,11 +314,13 @@ class ClientSession:
             raise ValueError("Choose '*' or another username")
         if not isinstance(text, str):
             raise ValueError("Message must be text")
-        raw = pack_msg(to, self.username, text, self._seq.next())
-        packet, body = parse_udp(raw)
-        self._send_udp(raw)
-        self._message(packet, body, "outgoing")
-        return str(packet.msg_id)
+        if not 1 <= len(text) <= MAX_TEXT_LEN:
+            raise ValueError(f"text must be 1..{MAX_TEXT_LEN} characters")
+        message_id = str(uuid.uuid4())
+        body = {"type": "MSG", "id": message_id, "to": to, "text": text}
+        self._send_control(body)
+        self._message(message_id, {**body, "from": self.username, "time": time.time()}, "outgoing")
+        return message_id
 
     def send_file(self, to, path):
         transfers = self._transfers
