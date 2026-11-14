@@ -2,16 +2,19 @@
 
 from collections import OrderedDict
 from copy import deepcopy
+from functools import partial
 import logging
 import queue
 import random
 import threading
 import time
+import uuid
 from pathlib import Path
 
 from file_receiver import FileReceiver
 from file_sender import FileSender
-from protocol import ACK, FILE_CHUNK, FILE_META, new_id
+from config import FILE_SESSION_TIMEOUT
+from protocol import ACK, FILE_CHUNK, FILE_META, new_id, parse_udp
 
 log = logging.getLogger("client.files")
 TERMINAL = {"completed", "failed"}
@@ -26,12 +29,15 @@ def loss_rate_from_env(value):
 
 class FileTransfers:
     def __init__(self, username, send_fn, seq, download_dir, *, loss_rate=0,
-                 stats=None, seed=None, on_event=None, quiet=False):
+                 stats=None, seed=None, on_event=None, quiet=False, send_control=None):
         self.username, self.send_fn, self.seq = username, send_fn, seq
         self.stats = stats if stats is not None else {}
         self.loss_rate = loss_rate_from_env(loss_rate)
         self.random = random.Random(seed)
         self.on_event, self.quiet = on_event, quiet
+        self.send_control = send_control
+        self.offers = {}
+        self.peers = {}
         self.senders = {}
         self.events = queue.Queue(maxsize=4096)
         self.stop_evt = threading.Event()
@@ -40,7 +46,7 @@ class FileTransfers:
         self._pending_lock = threading.RLock()
         self._incoming = OrderedDict()
         self._last_progress = {}
-        self.receiver = FileReceiver(self._send, download_dir, username=username,
+        self.receiver = FileReceiver(self._send_ack, download_dir, username=username,
                                      seq=seq, on_result=self._received)
         self.stats["receiver_backend"] = "production"
         self.thread = threading.Thread(target=self._run, name=f"files-{username}", daemon=True)
@@ -60,11 +66,14 @@ class FileTransfers:
                 "progress": 0.0, "status": "queued", "error": None,
                 "path": None, "checksum": None, "cwnd": None, "rto": None, **extra}
 
-    def _send(self, raw):
+    def _send(self, raw, endpoint=None):
         if self.random.random() < self.loss_rate:
             self.stats["file_packets_dropped"] = self.stats.get("file_packets_dropped", 0) + 1
             return
-        self.send_fn(raw)
+        if endpoint is None:
+            self.send_fn(raw)
+        else:
+            self.send_fn(raw, endpoint)
 
     def send_file(self, to, path):
         if not isinstance(to, str) or not to.strip() or to in ("*", self.username):
@@ -88,10 +97,13 @@ class FileTransfers:
                 raise
         return str(mid)
 
-    def on_packet(self, packet, body):
+    def on_control(self, body):
+        self.events.put_nowait(("control", body, None))
+
+    def on_packet(self, packet, body, address=None):
         if not self.stop_evt.is_set():
             try:
-                self.events.put_nowait(("packet", packet, body))
+                self.events.put_nowait(("packet", packet, (body, address)))
             except queue.Full:
                 pass  # selective retransmission recovers loss; never block UDP reception
 
@@ -194,13 +206,85 @@ class FileTransfers:
     def _start_send(self, job):
         mid, to, path = job
         try:
-            self.senders[mid] = FileSender(path, to, self.username, self._send, seq=self.seq, msg_id=mid)
+            sender = FileSender(path, to, self.username, self._send, seq=self.seq, msg_id=mid)
+            if self.send_control is None:
+                self.senders[mid] = sender
+            else:
+                self.send_control({"type": "FILE_OFFER", "transfer_id": str(mid), "to": to,
+                                   "filename": path.name, "size": sender.size, "sha256": sender.checksum})
+                self.offers[mid] = (sender, time.monotonic() + FILE_SESSION_TIMEOUT)
         except (OSError, ValueError) as exc:
             with self._pending_lock:
                 self._pending.discard(mid)
             self.stats["files_send_failed"] = self.stats.get("files_send_failed", 0) + 1
             self._emit(self._record(mid, "send", to, path.name, status="failed", error=str(exc)))
             log.error("[%s] Cannot send %s: %s", self.username, path, exc)
+
+    def _handle_control(self, body):
+        try:
+            mid = uuid.UUID(body.get("transfer_id"))
+        except (TypeError, ValueError, AttributeError):
+            return
+        kind = body["type"]
+        if kind == "FILE_OFFER":
+            # The existing CLI accepts incoming transfers automatically.
+            if len(self.peers) >= 32 or mid in self.peers or mid in self.offers:
+                self.send_control({"type": "FILE_REJECT", "transfer_id": str(mid)})
+                return
+            self.peers[mid] = (body, None, time.monotonic())
+            self.send_control({"type": "FILE_ACCEPT", "transfer_id": str(mid)})
+        elif kind == "FILE_READY":
+            endpoint = (body["peer_ip"], body["peer_udp_port"])
+            offer = self.offers.pop(mid, None)
+            if offer:
+                sender = offer[0]
+                sender.send_fn = partial(self._send, endpoint=endpoint)
+                self.peers[mid] = (None, endpoint, time.monotonic())
+                self.senders[mid] = sender
+            elif mid in self.peers and self.peers[mid][1] is None:
+                self.peers[mid] = (self.peers[mid][0], endpoint, time.monotonic())
+        elif kind == "FILE_REJECT":
+            self._cancel(mid, "Peer declined offer")
+        elif kind == "FILE_CANCEL":
+            self._cancel(mid, body.get("reason", "Transfer cancelled"))
+
+    def _cancel(self, mid, reason):
+        self.peers.pop(mid, None)
+        offer = self.offers.pop(mid, None)
+        if offer:
+            sender = offer[0]
+            sender.cancel(reason)
+            self._finished(sender)
+        if mid in self.senders:
+            self.senders[mid].cancel(reason)
+        self._received(mid, None, reason)
+
+    def _send_ack(self, raw):
+        if self.send_control is None:
+            self._send(raw)
+            return
+        packet, _ = parse_udp(raw)
+        peer = self.peers.get(packet.msg_id)
+        if peer and peer[1]:
+            self._send(raw, peer[1])
+
+    def _accept_packet(self, packet, body, address):
+        if self.send_control is None:
+            return True
+        peer = self.peers.get(packet.msg_id)
+        if peer is None or peer[1] != address:
+            return False
+        offer = peer[0]
+        if (packet.ptype == ACK) != (offer is None):
+            return False
+        if packet.ptype == FILE_META and (
+            not isinstance(body, dict) or any(body.get(key) != offer.get(key)
+                for key in ("filename", "size", "from", "to"))
+            or body.get("checksum") != offer["sha256"]
+        ):
+            return False
+        self.peers[packet.msg_id] = (offer, address, time.monotonic())
+        return True
 
     def _run(self):
         next_report = time.monotonic()
@@ -213,7 +297,15 @@ class FileTransfers:
                         break
                     if kind == "send":
                         self._start_send(first)
+                    elif kind == "control":
+                        try:
+                            self._handle_control(first)
+                        except OSError:
+                            log.debug("[%s] File control connection closed", self.username)
                     elif kind == "packet":
+                        second, address = second
+                        if not self._accept_packet(first, second, address):
+                            continue
                         if first.ptype == ACK:
                             sender = self.senders.get(first.msg_id)
                             if sender:
@@ -221,6 +313,12 @@ class FileTransfers:
                         elif first.ptype in (FILE_META, FILE_CHUNK):
                             self._receive_packet(first, second)
                     elif kind == "left":
+                        for mid, (offer, _, _) in list(self.peers.items()):
+                            if offer and offer["from"] == first:
+                                self._cancel(mid, f"Peer '{first}' went offline")
+                        for mid, (sender, _) in list(self.offers.items()):
+                            if sender.to == first:
+                                self._cancel(mid, f"Peer '{first}' went offline")
                         for sender in self.senders.values():
                             if sender.to == first:
                                 sender.cancel(f"Peer '{first}' went offline")
@@ -228,6 +326,12 @@ class FileTransfers:
                             if entry["record"]["peer"] == first:
                                 self._received(mid, None, f"Peer '{first}' went offline")
                 now = time.monotonic()
+                for mid, (_, deadline) in list(self.offers.items()):
+                    if now >= deadline:
+                        self._cancel(mid, "Offer timed out")
+                for mid, (_, _, last_seen) in list(self.peers.items()):
+                    if now - last_seen >= FILE_SESSION_TIMEOUT:
+                        self._cancel(mid, "UDP transfer timed out")
                 for mid, sender in list(self.senders.items()):
                     try:
                         sender.tick()
@@ -236,6 +340,7 @@ class FileTransfers:
                     if sender.done:
                         self._finished(sender)
                         del self.senders[mid]
+                        self.peers.pop(mid, None)
                     else:
                         self._emit_progress(mid, self._sender_record(sender))
                         if now >= next_report:
@@ -262,6 +367,9 @@ class FileTransfers:
                 sender.cancel("Client disconnected")
                 self._finished(sender)
             self.senders.clear()
+            for mid in list(self.offers):
+                self._cancel(mid, "Client disconnected")
+            self.peers.clear()
             # Publish failures for sends accepted but not started before shutdown.
             while True:
                 try:

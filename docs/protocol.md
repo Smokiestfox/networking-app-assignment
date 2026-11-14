@@ -598,3 +598,9 @@ sequenceDiagram
     Bob->>Server: ACK (final chunk, sent after verification and saving)
     Server->>Alice: ACK (relay, FileSender marks DONE)
 ```
+
+### Week 6 direct file transfers
+
+ClientSession sends a FILE_OFFER over the authenticated TCP connection. The receiving CLI automatically accepts eligible offers to preserve the existing /send workflow. The server answers with FILE_READY for each participant, using the UDP endpoints registered during AUTH. FILE_META, FILE_CHUNK and ACK then travel directly between the clients. The receiver matches metadata to the offer and validates SHA-256 before completing the transfer.
+
+The direct path uses the existing UDP header and ACK format. Both clients need direct UDP reachability. Each client checks the transfer ID, packet direction and source endpoint. A closed or unreachable peer results in cancellation or timeout. The server still supports the legacy relay for older clients. The direct path does not fall back to it.

@@ -217,7 +217,8 @@ class ClientSession:
                 self._transfers = FileTransfers(
                     self.username, self._send_udp, self._seq, self.download_dir,
                     loss_rate=self.loss_rate, stats=self.stats, seed=self.loss_seed,
-                    on_event=self._file_event, quiet=not self.console)
+                    on_event=self._file_event, quiet=not self.console,
+                    send_control=self._send_control)
                 self._set_users(self._user_details)
                 self._set_status("connected")
                 self._threads = [
@@ -234,11 +235,11 @@ class ClientSession:
         self.close(graceful=False, error=detail)
         return False
 
-    def _send_udp(self, raw):
+    def _send_udp(self, raw, endpoint=None):
         udp = self._udp
         if udp is None:
             raise ConnectionError("UDP socket is closed")
-        udp.sendto(raw, self._server_addr)
+        udp.sendto(raw, endpoint or self._server_addr)
 
     def _tcp_reader(self):
         try:
@@ -255,6 +256,8 @@ class ClientSession:
                     self._set_users(users)
                     self._users_response = deepcopy(users)
                     self._users_reply.set()
+                elif body.get("type") in {"FILE_OFFER", "FILE_READY", "FILE_REJECT", "FILE_CANCEL"}:
+                    self._transfers.on_control(body)
                 elif body.get("type") == "MSG":
                     if (all(isinstance(body.get(k), str) for k in ("id", "from", "to", "text"))
                             and isinstance(body.get("time"), (int, float))):
@@ -279,17 +282,15 @@ class ClientSession:
                 if not self._stop.is_set():
                     self.close(graceful=False, error=f"UDP channel: {exc}")
                 return
-            if address != self._server_addr:
-                continue
             try:
                 packet, body = parse_udp(raw)
-                if packet.ptype == USER_LIST:
+                if packet.ptype == USER_LIST and address == self._server_addr:
                     if isinstance(body.get("users"), list):
                         self._set_users(body["users"])
                 elif packet.ptype in (FILE_META, FILE_CHUNK, ACK):
                     if packet.ptype != ACK:
                         self.stats["file_packets_received"] = self.stats.get("file_packets_received", 0) + 1
-                    self._transfers.on_packet(packet, body)
+                    self._transfers.on_packet(packet, body, address)
             except (ValueError, TypeError, KeyError):
                 log.debug("[%s] Ignored malformed UDP packet", self.username)
 
