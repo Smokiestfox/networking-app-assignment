@@ -73,38 +73,46 @@ Khi peer rời hoặc client đóng, các phiên đang hoạt động phát lỗ
 
 ```python
 # web_gateway.py (Bình phụ trách)
-def start_gateway(session, *, host="127.0.0.1", port=8080):
+def start_gateway(session=None, *, host="127.0.0.1", port=8080, ...):
     # Khởi chạy HTTP server trên background thread; trả về ngay.
-    # Dùng chính session được truyền vào, không tạo ClientSession thứ hai.
+    # Hỗ trợ cả chế độ dùng session truyền vào lẫn chế độ quản lý session động (Login/Logout).
     # Trả handle có phương thức close() để dừng server và nhả cổng.
     ...
 ```
 
-CLI gọi factory sau khi client đã AUTH thành công và gọi `handle.close()` khi thoát. Nếu bind HTTP thất bại, factory cần tự dọn phần khởi tạo dở rồi ném OSError/RuntimeError để CLI đóng session. Factory không chạy một vòng server blocking trên thread gọi.
+CLI gọi factory sau khi client đã AUTH thành công (hoặc gọi ở chế độ `--web-only` với `session=None`) và gọi `handle.close()` khi thoát. Nếu bind HTTP thất bại, factory tự dọn dẹp phần khởi tạo dở rồi ném OSError/RuntimeError.
 
 | Request | Response / ánh xạ |
 | --- | --- |
-| `GET /api/state` | 200 + nguyên `session.get_state()`, JSON UTF-8, `Cache-Control: no-store`. |
-| `POST /api/chat` | JSON `{"to":"bob","text":"Xin chào"}`; gọi `session.send_chat`. 202 + `{"message_id":"UUID"}` khi đã gửi UDP; đây không phải ACK người nhận. |
-| Dữ liệu chat sai | 400 + `{"error":"Mô tả"}`. |
+| `GET /api/state` | 200 + nguyên snapshot `session.get_state()` JSON UTF-8, `Cache-Control: no-store`. Nếu chưa login, trả về state `disconnected`. |
+| `POST /api/chat` | JSON `{"to":"bob","text":"Xin chào"}`; gọi `session.send_chat`. 202 + `{"message_id":"UUID"}` khi đã phát đi. 401 nếu chưa login. |
+| `POST /api/login` | JSON `{"username":"alice","password":"123"}`; tạo phiên `ClientSession` và kết nối server. 200 khi thành công, 401 khi xác thực thất bại. |
+| `POST /api/logout` | Đóng phiên làm việc hiện tại và đặt lại trạng thái chờ đăng nhập. 200 + `{"status":"ok"}`. |
+| `POST /api/file/send` | JSON `{"to":"bob","path":"..."}`; gửi tệp từ đường dẫn máy. 202 + `{"transfer_id":"UUID"}`. |
+| `POST /api/file/upload` | JSON `{"to":"bob","filename":"...","content":"<b64>"}`; upload tệp từ browser (hỗ trợ đến 50 MiB) và gửi P2P. |
+| `GET /api/file/download/<file>` | Tải tệp nhận hoàn tất từ thư mục `downloads/` về máy. Chặn path traversal. |
+| `GET /api/transfers` | Danh sách tiến độ truyền file và thông số kiểm soát nghẽn CUBIC (`progress`, `cwnd`, `rto`). |
+| `GET /api/events` | Luồng **Server-Sent Events (SSE)** đẩy cập nhật Real-time (0ms trễ) mỗi khi có tin nhắn, user hay tiến độ file thay đổi. |
+| Dữ liệu payload sai | 400 + `{"error":"Mô tả"}`. |
 | Client chưa kết nối / socket lỗi | 503 + `{"error":"Mô tả"}`. |
 | Sai method/route | 405/404 tương ứng. |
 
-Tuần 5 chưa có HTTP upload, login/logout, WebSocket hoặc API lấy lịch sử. Browser nhận cả UI và API từ cùng gateway loopback. Bình chịu trách nhiệm giới hạn request/static paths và kiểm tra request; trạng thái HTTP còn hoạt động không được dùng thay trạng thái mạng trong snapshot.
-
-Quỳnh có thể bắt đầu UI bằng `fetch("/mock_state.json")`, sau đó chuyển nguồn thành `fetch("/api/state")` khi ghép gateway. Mock cần được phục vụ cùng static UI qua HTTP, không mở trang bằng `file://`. Poll khoảng một giây, kiểm tra `response.ok` và hiển thị lỗi HTTP riêng với `state.status`.
+Xem tài liệu chi tiết tại [docs/web_gateway.md](web_gateway.md).
 
 ## Chạy và kiểm chứng
 
 ```powershell
-# CLI hiện có
+# 1. Chạy CLI thuần túy (không web)
 python client.py alice pass123
 
-# Sau khi Bình bàn giao gateway và Quỳnh bàn giao UI
+# 2. Chạy CLI kèm Web Gateway (dashboard trên cổng 8080)
 python client.py alice pass123 --web-port 8080
 python client.py bob pass123 --web-port 8081
 
-# Server/custom ports
+# 3. Chạy Web-First Mode (đăng nhập trực tiếp trên trình duyệt)
+python client.py --web-port 8080 --web-only
+
+# 4. Server/custom ports
 python client.py alice pass123 127.0.0.1 9100 --udp-port 9101 --web-port 8080
 ```
 

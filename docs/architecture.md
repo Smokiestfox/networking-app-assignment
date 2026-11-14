@@ -256,4 +256,8 @@ Each file record tracks direction, peer, filename, size, acknowledged/accepted b
 
 TCP requests are serialized when a caller needs a USER_LIST reply, and all replies are consumed by the control reader. The heartbeat thread only writes PING; PONG or other control replies refresh liveness. EOF, malformed control responses, socket errors or CLIENT_TIMEOUT without control traffic publish an error and stop the session. Browser HTTP availability alone says nothing about network-session health.
 
-The optional CLI flag `--web-port` calls Binh's `start_gateway(session, host="127.0.0.1", port=...)` after AUTH. That factory runs HTTP in the background and returns a closeable handle; the CLI closes it before closing the session. Separate clients use separate HTTP ports. The client reports an unavailable gateway instead of silently claiming the web UI is running. See `docs/client_api.md` and the root `mock_state.json` for the exact shared schema and routes.
+The optional CLI flag `--web-port` starts the raw-socket HTTP gateway (`start_gateway()`). It supports two execution modes:
+1. **CLI Session Mode**: started after AUTH with `session` passed in (`python client.py alice pass123 --web-port 8080`).
+2. **Web-First Mode (`--web-only`)**: started without an initial session (`python client.py --web-port 8080 --web-only`), allowing dynamic login and logout via `POST /api/login` and `POST /api/logout`.
+
+The gateway also provides Server-Sent Events (`GET /api/events`) for 0ms latency UI updates, file upload (`POST /api/file/upload`), and file download (`GET /api/file/download/<filename>`). See `docs/client_api.md` and `docs/web_gateway.md` for complete API schemas and implementation details.

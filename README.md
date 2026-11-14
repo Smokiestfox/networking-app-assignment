@@ -12,6 +12,7 @@ Môn học: Network Application Development (MMT-BTL).
 .
 ├── client.py            # ClientSession API, state/callback và CLI tương thích
 ├── server.py            # Server quản lý kết nối TCP, định tuyến UDP, relay file và dọn dẹp phiên
+├── web_gateway.py       # HTTP Gateway raw socket: API state, chat, auth, file transfer và SSE push
 ├── protocol.py          # Cấu trúc packet (37-byte header), framing TCP, mã hóa Fernet & helper đóng/mở gói
 ├── config.py            # Cấu hình IP, TCP/UDP port, timeout, chunk size, window size
 ├── registry.py          # Quản lý danh sách active users thread-safe
@@ -23,10 +24,15 @@ Môn học: Network Application Development (MMT-BTL).
 ├── mock_state.json      # Snapshot v1 mẫu để làm UI độc lập với gateway
 ├── users.json           # Dữ liệu tài khoản mẫu phục vụ kiểm thử
 ├── requirements.txt     # Danh sách thư viện phụ thuộc
+├── ui/                  # Giao diện Web Dashboard (HTML5, Vanilla JS, CSS responsive)
+│   ├── index.html       # Giao diện chính: Login Card, Chat Room, File Transfer & Status
+│   ├── app.js           # Xử lý sự kiện UI, SSE Real-time, upload Base64 & download file
+│   └── style.css        # Hệ thống styling hiện đại, responsive layout & animation
 ├── docs/
 │   ├── architecture.md  # Tài liệu kiến trúc hệ thống 3 lớp & luồng đa luồng
 │   ├── protocol.md      # Đặc tả giao thức chi tiết, sơ đồ trạng thái & sequence diagrams
-│   └── client_api.md    # API client và contract HTTP/JSON tuần 5
+│   ├── client_api.md    # API client và contract HTTP/JSON tuần 5
+│   └── web_gateway.md   # Hướng dẫn chi tiết & bảo mật raw-socket HTTP Gateway
 └── tests/               # Bộ kiểm thử tự động (pytest)
 ```
 
@@ -161,19 +167,29 @@ finally:
 - UDP được bind trước AUTH và `udp_port` được khai báo ngay khi đăng nhập, kể cả trong chế độ TCP simulator có dùng heartbeat.
 - Chữ ký `run_client()` và các lệnh `/all`, `/to`, `/send`, `/list`, `/quit` được giữ tương thích.
 
-Sau khi Bình cung cấp `web_gateway.start_gateway(session, host=..., port=...)` và Quỳnh có UI:
+Sau khi Bình hoàn tất `web_gateway.py` và Quỳnh hoàn tất giao diện `ui/`:
 
 ```powershell
+# Chế độ 1: Đăng nhập từ CLI và kích hoạt Web Gateway trên cổng 8080
 python client.py alice pass123 --web-port 8080
 python client.py bob pass123 --web-port 8081
+
+# Chế độ 2: Web-First Mode (Khởi chạy trực tiếp, đăng nhập/đăng xuất hoàn toàn trên trình duyệt)
+python client.py --web-port 8080 --web-only
 ```
 
-Mỗi tiến trình client có một gateway loopback và cổng riêng. Factory gateway phải trả ngay một handle có `close()`. HTTP chỉ cần `GET /api/state` và `POST /api/chat`; file vẫn gửi từ CLI, progress lên UI. Nếu chưa có module gateway, CLI báo lỗi rõ ràng; bỏ `--web-port` để dùng client hiện tại.
+Mỗi tiến trình client có một gateway loopback và cổng riêng. Gateway được viết thuần 100% bằng **raw socket** (`socket` TCP + `threading`), hỗ trợ đầy đủ:
+- `GET /api/state` & `POST /api/chat`: Xem trạng thái snapshot và gửi tin nhắn tức thì.
+- `POST /api/login` & `POST /api/logout`: Quản lý phiên đăng nhập/đăng xuất động trực tiếp trên web UI.
+- `POST /api/file/send` & `POST /api/file/upload`: Gửi tệp từ đường dẫn máy hoặc upload tệp Base64 từ trình duyệt (lên tới 50 MiB).
+- `GET /api/file/download/<filename>`: Tải tệp tin nhận hoàn tất về máy tính.
+- `GET /api/transfers`: Xem tiến độ truyền file và thông số kiểm soát nghẽn CUBIC (`cwnd`, `rto`, `progress`).
+- `GET /api/events`: Luồng **Server-Sent Events (SSE)** đẩy cập nhật Real-time (0ms trễ) xuống giao diện Web.
+
+Xem chi tiết kiến trúc, bảng mã lỗi và hướng dẫn tại [docs/web_gateway.md](docs/web_gateway.md).
 
 Với server/cổng tùy chỉnh:
 
 ```powershell
 python client.py alice pass123 127.0.0.1 9100 --udp-port 9101 --web-port 8080
 ```
-
-Mã hóa TCP/config key, sửa log/xác thực endpoint của server và HTML/JavaScript vẫn cần ghép từ phần Hậu/Bình/Quỳnh. Snapshot/gateway còn chạy không thay thế trạng thái kết nối client-server trong `status`.
