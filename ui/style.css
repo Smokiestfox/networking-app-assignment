@@ -159,31 +159,6 @@ body {
     box-shadow: 0 0 0 3px var(--primary-ring);
 }
 
-.auth-hint {
-    margin-top: 18px;
-    text-align: center;
-    font-size: 0.8rem;
-    color: var(--text-muted);
-    background: var(--bg);
-    padding: 8px 12px;
-    border-radius: var(--radius-sm);
-    border: 1px solid var(--border);
-}
-
-.hint-label {
-    font-weight: 500;
-    margin-right: 4px;
-}
-
-.auth-hint code {
-    background: #e2e8f0;
-    padding: 2px 5px;
-    border-radius: 4px;
-    font-weight: 600;
-    color: var(--primary);
-    font-size: 0.8rem;
-}
-
 /* Alert Error */
 .alert {
     padding: 10px 14px;
