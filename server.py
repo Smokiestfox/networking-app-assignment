@@ -5,7 +5,7 @@ import threading
 import time
 import uuid
 from datetime import datetime
-from file_rendezvous import FileRendezvous
+from file_transfer_coordinator import FileTransferCoordinator
 from config import SERVER_HOST, TCP_PORT, UDP_PORT, CLIENT_TIMEOUT, FILE_SESSION_TIMEOUT
 from protocol import (
     recv_json_frame,
@@ -95,7 +95,7 @@ class CollaborationServer:
         self.connection_locks = {}
         self.connection_locks_guard = threading.Lock()
         self.registry = registry if registry is not None else UserRegistry(users_file=users_file)
-        self.file_rendezvous = FileRendezvous(self.registry, self._send_tcp)
+        self.file_transfer_coordinator = FileTransferCoordinator(self.registry, self._send_tcp)
         self.client_timeout = client_timeout
         self.cleanup_interval = 0.5  # Chu kỳ quét timeout (giây)
         self.running = False
@@ -588,7 +588,7 @@ class CollaborationServer:
             try:
                 self.cleanup_stale_users()
                 self.cleanup_file_sessions()
-                self.file_rendezvous.expire()
+                self.file_transfer_coordinator.expire()
             except Exception as e:
                 text = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Error in cleanup_loop: {e}"
                 self.log_file_write(text)
@@ -820,7 +820,7 @@ class CollaborationServer:
 
                 elif msg_type in {"FILE_OFFER", "FILE_ACCEPT", "FILE_REJECT", "FILE_CANCEL"}:
                     if current_username is not None:
-                        self.file_rendezvous.handle(current_username, conn, data)
+                        self.file_transfer_coordinator.handle(current_username, conn, data)
 
                 elif msg_type == "MSG":
                     if current_username is not None:
@@ -865,7 +865,7 @@ class CollaborationServer:
             if current_username:
                 was_active = self.registry.unregister(username=current_username)
                 self.close_sessions_for_user(current_username)
-                self.file_rendezvous.expire(current_username)
+                self.file_transfer_coordinator.expire(current_username)
                 with self.last_seen_lock:
                     self.last_seen.pop(current_username, None)
                 with self.udp_addrs_lock:

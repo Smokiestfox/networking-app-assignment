@@ -1,4 +1,4 @@
-"""TCP rendezvous for direct UDP file transfers."""
+"""TCP coordination for direct UDP file transfers."""
 import threading
 import time
 import uuid
@@ -7,7 +7,7 @@ from config import FILE_SESSION_TIMEOUT
 from file_sender import CHUNK_SIZE, MAX_CHUNKS
 
 
-class FileRendezvous:
+class FileTransferCoordinator:
     def __init__(self, registry, send):
         self.registry = registry
         self.send = send

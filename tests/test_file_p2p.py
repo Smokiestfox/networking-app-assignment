@@ -13,7 +13,7 @@ from server import CollaborationServer
                                             (0, "reject"), (0, "timeout"), (0, "disconnect")])
 def test_direct_file_transfer(tmp_path, monkeypatch, loss, outcome):
     if outcome == "timeout":
-        monkeypatch.setattr("file_rendezvous.FILE_SESSION_TIMEOUT", 0.1)
+        monkeypatch.setattr("file_transfer_coordinator.FILE_SESSION_TIMEOUT", 0.1)
     server = CollaborationServer(host="127.0.0.1", port=0, udp_port=0,
                                  log_file=str(tmp_path / "server.log"))
     thread = threading.Thread(target=server.run, daemon=True)
@@ -64,8 +64,8 @@ def test_direct_file_transfer(tmp_path, monkeypatch, loss, outcome):
         if outcome == "disconnect":
             deadline = time.monotonic() + 2
             while time.monotonic() < deadline:
-                with server.file_rendezvous.lock:
-                    if mid in server.file_rendezvous.pending:
+                with server.file_transfer_coordinator.lock:
+                    if mid in server.file_transfer_coordinator.pending:
                         break
                 time.sleep(0.01)
             else:
@@ -85,8 +85,8 @@ def test_direct_file_transfer(tmp_path, monkeypatch, loss, outcome):
                 "disconnect": {"Peer disconnected", "Peer 'bob' went offline"},
             }[outcome]
             assert not endpoints
-            with server.file_rendezvous.lock:
-                assert not server.file_rendezvous.pending
+            with server.file_transfer_coordinator.lock:
+                assert not server.file_transfer_coordinator.pending
             return
         assert sent and sent["status"] == "completed", sent
         received, = bob.download_dir.glob('*_example.bin')
