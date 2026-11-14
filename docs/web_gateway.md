@@ -47,6 +47,12 @@ python client.py alice pass123 --web-port 8080
 python client.py bob pass123 --web-port 8081
 ```
 
+**4. Khởi chạy Web UI thuần túy (Web-First Mode - Đăng nhập trực tiếp trên Web UI):**
+```powershell
+python client.py --web-port 8080 --web-only
+```
+Sau đó mở trình duyệt tại `http://127.0.0.1:8080` để thấy form Đăng nhập, nhập username/password và trải nghiệm toàn bộ tính năng.
+
 **Thử nghiệm API HTTP của Alice từ một terminal khác (hoặc trình duyệt / Postman):**
 ```powershell
 # Đọc snapshot trạng thái hiện tại (users online, messages, transfers)
@@ -107,12 +113,18 @@ Mọi phản hồi JSON đều đính kèm các header chuẩn:
 
 | Endpoint & Method | Hành vi xử lý | Mã phản hồi & Body |
 | --- | --- | --- |
-| `GET /api/state` (hỗ trợ query string như `?ts=...`) | Gọi `session.get_state()`, trả nguyên snapshot Schema v1 UTF-8 | `200 OK` + JSON snapshot;<br>`503` + `{"error": ...}` nếu `get_state()` ném `OSError`/`RuntimeError` |
-| `POST /api/chat` | Chấp nhận `application/json` (hoặc không gửi `Content-Type`), kiểm tra object có `to` chuỗi không rỗng và `text` kiểu `str`, gọi `session.send_chat(to, text)` | `202 Accepted` + `{"message_id": "<UUID>"}`;<br>`400` nếu JSON/field sai hoặc `send_chat` ném `ValueError`;<br>`503` nếu chưa kết nối / lỗi transport (`ConnectionError`, `OSError`, `RuntimeError`) |
+| `GET /api/state` | Trả về snapshot Schema v1 UTF-8. Nếu chưa đăng nhập, trả về snapshot mặc định trạng thái `disconnected`. | `200 OK` + JSON snapshot;<br>`503` nếu session lỗi transport |
+| `POST /api/login` | Đăng nhập tài khoản động (`{"username": "...", "password": "..."}`). Tạo và khởi chạy `ClientSession`. | `200 OK` + `{"status": "ok", "state": ...}`;<br>`400` nếu thiếu trường;<br>`401 Unauthorized` nếu sai tài khoản |
+| `POST /api/logout` | Đóng phiên làm việc hiện tại, đưa gateway về trạng thái chờ đăng nhập. | `200 OK` + `{"status": "ok", "state": ...}` |
+| `POST /api/chat` | Gửi tin nhắn (`{"to": "...", "text": "..."}`). Bắt buộc đã đăng nhập. | `202 Accepted` + `{"message_id": "<UUID>"}`;<br>`401` nếu chưa login;<br>`400` nếu payload sai;<br>`503` nếu lỗi kết nối |
+| `POST /api/file/send` | Gửi file từ đường dẫn cục bộ máy chủ (`{"to": "...", "path": "..."}`). | `202 Accepted` + `{"transfer_id": "<UUID>"}`;<br>`400` nếu file không tồn tại |
+| `POST /api/file/upload` | Nhận upload tệp từ browser qua Base64 (`{"to": "...", "filename": "...", "content": "<b64>"}`), lưu vào `uploads/` và gửi. Hỗ trợ tệp đến 50 MiB. | `202 Accepted` + `{"transfer_id": "...", "filename": "..."}` |
+| `GET /api/file/download/<file>` hoặc `?filename=...` | Cho phép tải về tệp tin đã nhận hoàn tất từ thư mục `downloads/` kèm header `Content-Disposition: attachment`. Chặn path traversal. | `200 OK` + file binary bytes;<br>`400` nếu tên file không an toàn;<br>`404` nếu tệp không tồn tại |
+| `GET /api/transfers` | Trả về danh sách trạng thái truyền/nhận file và thông số kiểm soát nghẽn CUBIC (`cwnd`, `rto`, `progress`). | `200 OK` + `{"transfers": [...]}` |
+| `GET /api/events` | Luồng **Server-Sent Events (SSE)** đẩy cập nhật Real-time (0ms trễ) mỗi khi có tin nhắn, user online/offline hoặc tiến độ tệp thay đổi. | `200 OK` + `Content-Type: text/event-stream` (luồng dữ liệu liên tục) |
 | `GET /mock_state.json` | Đọc tệp `mock_state.json` tại gốc repo phục vụ UI thử nghiệm | `200 OK` + nội dung JSON;<br>`404` nếu tệp không tồn tại |
-| `GET /` hoặc tài nguyên tĩnh | Ánh xạ `/` -> `index.html` trong thư mục static đã kiểm chứng; kiểm tra allowlist phần mở rộng và giới hạn `2 MiB` | `200 OK` + MIME type tương ứng (`UTF-8` cho text/HTML/CSS/JS/JSON);<br>`413` nếu vượt `MAX_STATIC_BYTES`;<br>`404` cho mọi đường dẫn không hợp lệ |
-| Sai method trên route hợp lệ (`POST /api/state`, `GET /api/chat`, `POST /mock_state.json`, `POST /` khi có UI) | Trả lỗi method và quảng bá phương thức hợp lệ | `405 Method Not Allowed` + header `Allow: GET` hoặc `Allow: POST` + `{"error": "Method not allowed"}` |
-| Route không tồn tại | Không khớp API hay static an toàn | `404 Not Found` + `{"error": "Not found"}` |
+| `GET /` hoặc tài nguyên tĩnh | Ánh xạ `/` -> `index.html` trong thư mục static/ui; kiểm tra allowlist phần mở rộng và giới hạn `2 MiB` | `200 OK` + MIME type tương ứng;<br>`413` nếu vượt `MAX_STATIC_BYTES`;<br>`404` cho đường dẫn sai |
+| Sai method trên route hợp lệ | Trả lỗi method và quảng bá phương thức hợp lệ | `405 Method Not Allowed` + header `Allow: ...` |
 
 ---
 

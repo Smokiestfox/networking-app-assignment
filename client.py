@@ -437,9 +437,33 @@ def _run_client_impl(username=None, password=None, host=None, port=TCP_PORT,
                      server_udp_port=UDP_PORT, duration=0.0, interactive=True,
                      send_messages=None, send_delay=0.3, stats=None, send_files=None,
                      download_dir=None, simulate_loss=None, loss_seed=None, ready_evt=None,
-                     session_stop=None, graceful_shutdown=True, web_port=None):
+                     session_stop=None, graceful_shutdown=True, web_port=None, web_only=False):
     session = gateway = None
     try:
+        if web_port is not None and (web_only or (username is None and not interactive)):
+            try:
+                gateway_factory = import_module("web_gateway").start_gateway
+            except (ImportError, AttributeError) as exc:
+                raise RuntimeError("Gateway is unavailable. web_gateway.py must expose "
+                                   "start_gateway(session, host='127.0.0.1', port=...). "
+                                   "Run without --web-port for the CLI.") from exc
+            gateway = gateway_factory(None, host="127.0.0.1", port=web_port,
+                                      server_host=host or SERVER_HOST, server_port=port,
+                                      server_udp_port=server_udp_port)
+            print(f"\n  [Web Gateway] Running at {gateway.url}")
+            print("  Open browser to login, chat, and transfer files. Press Ctrl+C to stop.\n")
+            if ready_evt is not None:
+                ready_evt.set()
+            try:
+                deadline = time.monotonic() + duration if duration > 0 else float("inf")
+                while gateway.is_running and time.monotonic() < deadline:
+                    if session_stop and session_stop.is_set():
+                        break
+                    time.sleep(0.2)
+            finally:
+                gateway.close()
+            return True
+
         username, password = _credentials(username, password, interactive)
         gateway_factory = None
         if web_port is not None:
@@ -528,6 +552,7 @@ def parse_cli_args(argv=None):
     parser.add_argument("port", nargs="?", type=port_number, default=TCP_PORT)
     parser.add_argument("--udp-port", type=port_number, default=UDP_PORT)
     parser.add_argument("--web-port", type=port_number, help="Start Binh's local HTTP gateway on this port")
+    parser.add_argument("--web-only", action="store_true", help="Start web gateway directly without initial CLI login")
     return parser.parse_args(argv)
 
 
@@ -535,4 +560,4 @@ if __name__ == "__main__":
     args = parse_cli_args()
     raise SystemExit(0 if _run_client_impl(
         username=args.username, password=args.password, host=args.host, port=args.port,
-        server_udp_port=args.udp_port, web_port=args.web_port) else 1)
+        server_udp_port=args.udp_port, web_port=args.web_port, web_only=args.web_only) else 1)

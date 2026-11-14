@@ -1349,3 +1349,194 @@ def test_run_client_gateway_collision_cleanup(
                     session.close()
             finally:
                 observer.close()
+
+
+
+def test_dynamic_mode_unauthenticated_state() -> None:
+    """Gateway started without a session serves default disconnected state and rejects actions."""
+    handle = web_gateway.start_gateway(session=None, port=0)
+    try:
+        status, _, body = request(handle, "GET", "/api/state")
+        assert status == 200
+        data = json.loads(body)
+        assert data["username"] is None
+        assert data["status"]["state"] == "disconnected"
+
+        status, _, body = request(handle, "POST", "/api/chat", body=json_body({"to": "bob", "text": "hi"}))
+        assert status == 401
+        assert "Not logged in" in json.loads(body)["error"]
+
+        status, _, body = request(handle, "POST", "/api/file/send", body=json_body({"to": "bob", "path": "file.txt"}))
+        assert status == 401
+
+        status, _, body = request(handle, "POST", "/api/file/upload", body=json_body({"to": "bob", "filename": "a.txt", "content": "YWJj"}))
+        assert status == 401
+
+        status, _, body = request(handle, "GET", "/api/transfers")
+        assert status == 200
+        assert json.loads(body)["transfers"] == []
+    finally:
+        handle.close()
+
+
+def test_transfers_endpoint(session: FakeSession, gateway: web_gateway.WebGateway) -> None:
+    """GET /api/transfers extracts transfers from active session snapshot."""
+    session.state["transfers"] = [{"id": "t1", "progress": 0.75, "filename": "doc.pdf"}]
+    status, _, body = request(gateway, "GET", "/api/transfers")
+    assert status == 200
+    data = json.loads(body)
+    assert len(data["transfers"]) == 1
+    assert data["transfers"][0]["filename"] == "doc.pdf"
+
+
+def test_file_send_and_upload_api(tmp_path: Path) -> None:
+    """POST /api/file/send and POST /api/file/upload validate arguments and call session."""
+    fake = FakeSession()
+    called = []
+    fake.send_file = lambda to, path: (called.append((to, path)) or "transfer-id-999")
+    handle = web_gateway.start_gateway(session=fake, port=0)
+    try:
+        sample = tmp_path / "test_sample.txt"
+        sample.write_text("sample content", encoding="utf-8")
+
+        # Test invalid path
+        status, _, _ = request(handle, "POST", "/api/file/send", body=json_body({"to": "bob", "path": "missing_file_xyz.txt"}))
+        assert status == 400
+
+        # Test valid path
+        status, _, body = request(handle, "POST", "/api/file/send", body=json_body({"to": "bob", "path": str(sample)}))
+        assert status == 202
+        assert json.loads(body)["transfer_id"] == "transfer-id-999"
+        assert called[-1] == ("bob", str(sample.resolve()))
+
+        # Test file upload with base64
+        import base64
+        content_b64 = base64.b64encode(b"uploaded file bytes").decode("ascii")
+        status, _, body = request(
+            handle,
+            "POST",
+            "/api/file/upload",
+            body=json_body({"to": "carol", "filename": "uploaded.txt", "content": content_b64}),
+        )
+        assert status == 202
+        resp = json.loads(body)
+        assert resp["transfer_id"] == "transfer-id-999"
+        assert resp["filename"] == "uploaded.txt"
+        assert called[-1][0] == "carol"
+        saved_file = Path(called[-1][1])
+        assert saved_file.is_file()
+        assert saved_file.read_bytes() == b"uploaded file bytes"
+    finally:
+        handle.close()
+
+
+def test_file_download_api() -> None:
+    """GET /api/file/download serves files from downloads directory and rejects traversal."""
+    handle = web_gateway.start_gateway(session=FakeSession(), port=0)
+    dl_dir = Path("downloads")
+    dl_dir.mkdir(exist_ok=True)
+    test_file = dl_dir / "temp_download_test.txt"
+    test_file.write_bytes(b"downloadable test content")
+    try:
+        # Download via path
+        status, headers, body = request(handle, "GET", "/api/file/download/temp_download_test.txt")
+        assert status == 200
+        assert body == b"downloadable test content"
+        assert 'attachment; filename="temp_download_test.txt"' in headers.get("content-disposition", "")
+
+        # Download via query parameter
+        status, headers, body = request(handle, "GET", "/api/file/download?filename=temp_download_test.txt")
+        assert status == 200
+        assert body == b"downloadable test content"
+
+        # Traversal rejected
+        status, _, _ = request(handle, "GET", "/api/file/download/../config.py")
+        assert status == 400
+
+        # Missing file
+        status, _, _ = request(handle, "GET", "/api/file/download/nonexistent_file_xyz.bin")
+        assert status == 404
+    finally:
+        test_file.unlink(missing_ok=True)
+        handle.close()
+
+
+def test_sse_events() -> None:
+    """GET /api/events keeps connection open and streams snapshots and broadcasts."""
+    fake = FakeSession()
+    handle = web_gateway.start_gateway(session=fake, port=0)
+    sock = socket.create_connection(("127.0.0.1", handle.port), timeout=2.0)
+    try:
+        sock.sendall(b"GET /api/events HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        data = bytearray()
+        while b"\r\n\r\n" not in data:
+            chunk = sock.recv(1024)
+            if not chunk:
+                break
+            data.extend(chunk)
+        header_text = data.decode("ascii", errors="replace")
+        assert "HTTP/1.1 200 OK" in header_text
+        assert "text/event-stream" in header_text
+
+        # Wait until client is registered
+        wait_until(lambda: len(handle._sse_clients) == 1)
+
+        # Read snapshot
+        while b"data:" not in data:
+            chunk = sock.recv(1024)
+            if not chunk:
+                break
+            data.extend(chunk)
+        assert b"data:" in data
+        assert b"snapshot" in data
+
+        # Test broadcast push
+        handle._broadcast_sse({"type": "test_push", "detail": "custom_event"})
+        data_push = bytearray()
+        sock.settimeout(2.0)
+        while b"test_push" not in data_push:
+            chunk = sock.recv(1024)
+            if not chunk:
+                break
+            data_push.extend(chunk)
+        assert b"custom_event" in data_push
+    finally:
+        sock.close()
+        handle.close()
+
+
+def test_real_server_login_and_logout() -> None:
+    """POST /api/login and POST /api/logout manage ClientSession against live server."""
+    with live_server(9480, 9481):
+        handle = web_gateway.start_gateway(session=None, port=0, server_port=9480, server_udp_port=9481)
+        try:
+            # Login fail with wrong password
+            status, _, body = request(handle, "POST", "/api/login", body=json_body({"username": "alice", "password": "wrong_password"}))
+            assert status == 401
+            assert "error" in json.loads(body)
+
+            # Login success
+            status, _, body = request(handle, "POST", "/api/login", body=json_body({"username": "alice", "password": "pass123"}))
+            assert status == 200
+            assert json.loads(body)["status"] == "ok"
+
+            # Check state reflects logged in user
+            status, _, body = request(handle, "GET", "/api/state")
+            assert status == 200
+            data = json.loads(body)
+            assert data["username"] == "alice"
+            assert data["status"]["state"] == "connected"
+
+            # Logout
+            status, _, body = request(handle, "POST", "/api/logout", body=b"{}")
+            assert status == 200
+            assert json.loads(body)["status"] == "ok"
+
+            # Check state reflects disconnected
+            status, _, body = request(handle, "GET", "/api/state")
+            assert status == 200
+            data = json.loads(body)
+            assert data["username"] is None
+            assert data["status"]["state"] == "disconnected"
+        finally:
+            handle.close()

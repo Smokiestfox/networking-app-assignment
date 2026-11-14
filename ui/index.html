@@ -3,63 +3,210 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Networking App - Client Dashboard (W6-05)</title>
+    <title>Networking App - Client Dashboard</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div class="container">
-        <!-- Header: Thông tin User & Trạng thái kết nối -->
-        <header>
-            <h1>🚀 Networking App Dashboard</h1>
-            <div class="user-status-info">
-                User: <strong id="current-user">Loading...</strong> | 
-                Status: <span id="connection-status" class="status-badge status-disconnected">disconnected</span>
+    <!-- 1. Màn hình Đăng nhập (Login View) -->
+    <div id="login-view" class="auth-wrapper" style="display: none;">
+        <div class="auth-card">
+            <div class="auth-header">
+                <div class="auth-icon-circle">
+                    <span class="auth-icon">🌐</span>
+                </div>
+                <h2>Đăng Nhập Hệ Thống</h2>
+                <p class="auth-subtitle">Kết nối tới mạng truyền thông P2P & Gateway</p>
+            </div>
+
+            <form id="login-form" class="auth-form" novalidate>
+                <div id="login-error" class="alert alert-danger" style="display: none;" role="alert"></div>
+
+                <div class="form-group">
+                    <label for="login-username">Tên đăng nhập (Username)</label>
+                    <div class="input-with-icon">
+                        <span class="icon">👤</span>
+                        <input type="text" id="login-username" name="username" placeholder="Nhập username (ví dụ: alice)" required autocomplete="username" autofocus>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="login-password">Mật khẩu (Password)</label>
+                    <div class="input-with-icon">
+                        <span class="icon">🔒</span>
+                        <input type="password" id="login-password" name="password" placeholder="Nhập mật khẩu" required autocomplete="current-password">
+                    </div>
+                </div>
+
+                <button type="submit" id="login-btn" class="btn btn-primary btn-block">
+                    <span class="btn-text">🚀 Đăng nhập</span>
+                </button>
+
+                <div class="auth-hint">
+                    <small>💡 Gợi ý tài khoản kiểm thử: <code>alice</code>, <code>bob</code>, <code>carol</code></small>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- 2. Dashboard Chính (Main Dashboard View) -->
+    <div id="dashboard-view" class="container" style="display: none;">
+        <!-- Header: Thông tin User & Trạng thái kết nối & Đăng xuất -->
+        <header class="app-header">
+            <div class="header-left">
+                <div class="brand-logo">🌐</div>
+                <div>
+                    <h1 class="brand-title">Networking App Dashboard</h1>
+                    <div class="header-sync-info">
+                        <span id="sync-status-badge" class="badge badge-subtle">
+                            <span class="pulse-dot"></span>
+                            <span id="sync-status-text">Kết nối Real-time (SSE)</span>
+                        </span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="header-right">
+                <div class="user-profile-badge">
+                    <div class="user-avatar" id="user-avatar">?</div>
+                    <div class="user-info">
+                        <div class="user-name-line">
+                            User: <strong id="current-user">Đang tải...</strong>
+                        </div>
+                        <div class="user-status-line">
+                            Status: 
+                            <span id="connection-status" class="status-badge status-disconnected">
+                                <span class="badge-dot"></span>
+                                <span class="status-text">disconnected</span>
+                            </span>
+                        </div>
+                    </div>
+                </div>
+                <button type="button" id="btn-logout" class="btn btn-outline-danger" title="Đăng xuất khỏi phiên làm việc">
+                    🚪 Đăng xuất
+                </button>
             </div>
         </header>
 
-        <!-- Sidebar: Danh sách User Online -->
-        <aside>
+        <!-- Sidebar: Danh sách User Online & Gateway Stats -->
+        <aside class="app-sidebar">
             <div class="card">
-                <h2>🟢 Online Users (<span id="user-count">0</span>)</h2>
+                <div class="card-title-bar">
+                    <h2>🟢 Online Users (<span id="user-count">0</span>)</h2>
+                </div>
                 <ul id="users-list" class="user-list">
-                    <li>Đang tải...</li>
+                    <li class="user-list-empty">Đang tải danh sách...</li>
                 </ul>
+            </div>
+
+            <div class="card stats-card">
+                <div class="card-title-bar">
+                    <h2>📊 Thống kê Gateway</h2>
+                </div>
+                <div class="stat-rows">
+                    <div class="stat-row">
+                        <span class="stat-name">Đồng bộ:</span>
+                        <span id="stat-sync-mode" class="stat-val font-semibold">SSE (Real-time)</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-name">Tin nhắn:</span>
+                        <span id="stat-msg-total" class="stat-val">0 tin</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-name">Tệp truyền:</span>
+                        <span id="stat-transfer-total" class="stat-val">0 tệp</span>
+                    </div>
+                </div>
             </div>
         </aside>
 
         <!-- Main Content: Chat & File Transfers -->
-        <main>
+        <main class="app-main">
             <!-- Chat Section (Hỗ trợ Broadcast & Unicast) -->
             <div class="card">
-                <h2>💬 Chat Room</h2>
+                <div class="card-title-bar">
+                    <h2>💬 Chat Room</h2>
+                    <span class="tag-subtle">Hỗ trợ Broadcast & Unicast</span>
+                </div>
                 <div id="chat-box" class="chat-box"></div>
                 <form id="chat-form" class="chat-form">
-                    <select id="chat-to">
-                        <option value="*">Broadcast (*)</option>
-                    </select>
-                    <input type="text" id="chat-text" placeholder="Nhập nội dung tin nhắn..." required autocomplete="off">
-                    <button type="submit">Gửi</button>
+                    <div class="chat-input-group">
+                        <select id="chat-to" title="Chọn người nhận tin nhắn">
+                            <option value="*">Broadcast (*)</option>
+                        </select>
+                        <input type="text" id="chat-text" placeholder="Nhập nội dung tin nhắn..." required autocomplete="off">
+                        <button type="submit" class="btn btn-primary btn-send">
+                            <span>Gửi</span> 💬
+                        </button>
+                    </div>
                 </form>
             </div>
 
-            <!-- File Transfers Section (Tiến độ, trạng thái, cwnd/rto) -->
+            <!-- Khu vực gửi tệp tin (File Transfer Form) -->
+            <div class="card file-send-card">
+                <div class="card-title-bar">
+                    <h2>📤 Gửi Tệp Tin (File Transfer Form)</h2>
+                    <span class="tag-subtle">Gửi tệp trực tiếp P2P</span>
+                </div>
+
+                <form id="file-upload-form" class="file-transfer-form">
+                    <div class="file-form-grid">
+                        <div class="form-col">
+                            <label for="file-to"><strong>Gửi tới (Recipient):</strong></label>
+                            <select id="file-to" required>
+                                <option value="" disabled selected>-- Chọn người nhận --</option>
+                            </select>
+                        </div>
+
+                        <div class="form-col">
+                            <label for="file-input"><strong>Chọn tệp tin:</strong></label>
+                            <div class="file-picker-control">
+                                <input type="file" id="file-input" class="file-input-hidden">
+                                <button type="button" id="btn-browse-file" class="btn btn-secondary">
+                                    📁 Chọn file từ máy tính
+                                </button>
+                                <div id="file-selection-info" class="file-selection-info" style="display: none;">
+                                    <span class="file-icon">📄</span>
+                                    <span id="file-name-display" class="file-name-display" title="">file.txt</span>
+                                    <span id="file-size-display" class="file-size-display">(0 KB)</span>
+                                    <button type="button" id="btn-clear-file" class="btn-clear" title="Bỏ chọn file">&times;</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="file-action-bar">
+                        <button type="submit" id="file-send-btn" class="btn btn-success">
+                            <span>🚀 Gửi file</span>
+                        </button>
+                        <div id="file-status" class="file-status-box" style="display: none;"></div>
+                    </div>
+                </form>
+            </div>
+
+            <!-- File Transfers Section (Tiến độ, trạng thái, cwnd/rto, Tải file) -->
             <div class="card">
-                <h2>📁 File Transfers</h2>
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Peer</th>
-                            <th>File Name</th>
-                            <th>Direction</th>
-                            <th>Progress</th>
-                            <th>Status</th>
-                            <th>Cwnd / RTO</th>
-                        </tr>
-                    </thead>
-                    <tbody id="transfers-tbody">
-                        <tr><td colspan="6" style="text-align: center;">Chưa có tệp truyền nào.</td></tr>
-                    </tbody>
-                </table>
+                <div class="card-title-bar">
+                    <h2>📁 File Transfers</h2>
+                    <span class="tag-subtle">Tiến độ truyền & Tải về</span>
+                </div>
+                <div class="table-container">
+                    <table class="transfers-table">
+                        <thead>
+                            <tr>
+                                <th>Peer</th>
+                                <th>File Name</th>
+                                <th>Direction</th>
+                                <th>Progress</th>
+                                <th>Status</th>
+                                <th>Cwnd / RTO</th>
+                                <th>Hành động</th>
+                            </tr>
+                        </thead>
+                        <tbody id="transfers-tbody">
+                            <tr><td colspan="7" class="table-empty">Chưa có tệp truyền nào.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </main>
     </div>
