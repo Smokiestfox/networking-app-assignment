@@ -33,6 +33,7 @@ class Incoming:
     meta: dict #thông tin metadata của file như tên, size, checksum
     last_seen: float #mốc tgian nhận gói tin gần nhất(tính timeout)
     chunks: dict = field(default_factory = dict) #bộ đệm lưu mảnh: {chunk_index: bytes}
+    bytes_received: int = 0 #tổng số byte thật đã nhận (ko tính mảnh trùng)
     path: Optional[Path] = None #đường dẫn file sau khi ghép và lưu thành công
     complete: bool = False # đánh dầu đã nhận đủ và lưu file xong
     failed: bool = False #đánh dấu phiên thất bại
@@ -48,6 +49,7 @@ class FileReceiver:
         clock = time.monotonic,
         timeout = FILE_SESSION_TIMEOUT,
         on_result = None,
+        on_progress = None,
         max_sessions = 16,
     ):
 
@@ -58,6 +60,7 @@ class FileReceiver:
         self.clock = clock
         self.timeout = timeout
         self.on_result = on_result
+        self.on_progress = on_progress
         self.max_sessions = max_sessions
         self.sessions: Dict[object, Incoming] = {}
         self._lock = threading.RLock() 
@@ -73,6 +76,16 @@ class FileReceiver:
     def _notify(self, mid, session: Incoming, error = None):
         if self.on_result: #gọi hàm callback thông báo kết quả ra giao diện người dùng
             self.on_result(mid, session.path, error)
+
+    def _notify_progress(self, mid, session: Incoming):
+        if self.on_progress:
+            self.on_progress(
+                mid,
+                session.bytes_received,
+                session.meta["size"],
+                len(session.chunks),
+                session.meta["chunks"],
+            )
 
     def on_packet(self, packet, body) -> bool:
         with self._lock:
@@ -120,12 +133,19 @@ class FileReceiver:
                 return True
 
             previous = session.chunks.get(packet.chunk)
-            if previous is not None and previous != body: #ktra mảnh trùng lặp: nếu đã có rùi nhưng ndung bị lệch -> từ chối
-                return False
+            if previous is not None:
+                if previous != body: #ktra mảnh trùng lặp: nếu đã có rùi nhưng ndung bị leehcj -> từ chối
+                    return False
+                self._ack(packet) #mảnh trừng hợp lệ (do mất ACK): gửi lại ACK nhưng KO cộng thêm tiến độ
+                return True
+            
+            session.chunks[packet.chunk] = body #lưu mảnh mới vào bộ đệm theo chỉ số
+            session.bytes_received += len(body)
 
-            session.chunks[packet.chunk] = body #lưu mảnh vào bộ đệm theo chỉ số
+            if len(session.chunks) < total: #chỉ phát tiến độ trung gian khi chưa tới mảnh cuối
+                self._notify_progress(packet.msg_id, session)
 
-            if len(session.chunks) == total: # khi đã nhận đủ tất cả mảnh của file
+            if len(session.chunks) == total: #khi đã nhận đủ tất cả mảnh file
                 data = b"".join(session.chunks[i] for i in range(total)) #ghép tất cả các mảnh lại theo đúng thứ tự 0, 1, 2,.. total - 1
 
                 if hashlib.sha256(data).hexdigest() != session.meta["checksum"]: #ktra tính toàn vẹn: đối chiếu mã SHA-256 tính đc với checksum trong metadata
@@ -177,6 +197,15 @@ class FileReceiver:
                 if not session.complete and not session.failed:
                     self._notify(mid, session, "Receiver idle timeout")
             return expired
+
+    def cancel(self, msg_id):
+        with self._lock:
+            session = self.sessions.get(msg_id)
+            if session is not None and not session.complete and not session.failed:
+                session.failed = True
+                session.chunks.clear()
+                return True
+            return False
 
     def close(self):
         with self._lock:

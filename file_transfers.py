@@ -41,7 +41,8 @@ class FileTransfers:
         self._incoming = OrderedDict()
         self._last_progress = {}
         self.receiver = FileReceiver(self._send, download_dir, username=username,
-                                     seq=seq, on_result=self._received)
+                                     seq=seq, on_result=self._received,
+                                     on_progress = self._receive_progress)
         self.stats["receiver_backend"] = "production"
         self.thread = threading.Thread(target=self._run, name=f"files-{username}", daemon=True)
         self.thread.start()
@@ -119,9 +120,19 @@ class FileTransfers:
         else:
             self.stats["files_receive_failed"] = self.stats.get("files_receive_failed", 0) + 1
             log.error("[%s] Receive %s failed: %s", self.username, mid, error)
-        entry["chunks"].clear()
         entry["last_seen"] = time.monotonic()
+        self._last_progress.pop(mid, None)
         self._emit(record)
+
+    def _receive_progress(self, mid, bytes_received, total_bytes, chunks_received, total_chunks):
+        entry = self._incoming.get(mid)
+        if entry is None or entry["record"]["status"] in TERMINAL:
+            return
+        entry["last_seen"] = time.monotonic()
+        record = entry["record"]
+        record["bytes_transferred"] = bytes_received
+        record["progress"] = min(0.999, bytes_received / total_bytes) if total_bytes else 0.0 #giữ tối đa 0.999 trong lúc nhận, chỉ lên 1.0 ở _received() sau khi SHA-256 khớp và lưu xong
+        self._emit_progress(mid, record)
 
     def _receive_packet(self, packet, body):
         accepted = self.receiver.on_packet(packet, body)
@@ -131,22 +142,15 @@ class FileTransfers:
         if packet.ptype == FILE_META:
             if mid not in self._incoming:
                 record = self._record(mid, "receive", body["from"], body["filename"],
-                                      body["size"], checksum=body["checksum"], status="transferring")
-                self._incoming[mid] = {"record": record, "chunks": set(), "last_seen": now}
+                                    body["size"], checksum = body["checksum"], status = "transferring")
+                self._incoming[mid] = {"record": record, "last_seen": now}
                 self._emit(record)
             self._incoming[mid]["last_seen"] = now
         else:
             entry = self._incoming.get(mid)
             if entry is None or entry["record"]["status"] in TERMINAL:
-                return  # on_result may have completed this file inside on_packet()
-            entry["last_seen"] = now
-            if packet.chunk not in entry["chunks"]:
-                entry["chunks"].add(packet.chunk)
-                record = entry["record"]
-                record["bytes_transferred"] += len(body)
-                size = record["size"]
-                record["progress"] = min(0.999, record["bytes_transferred"] / size) if size else 0.0
-                self._emit_progress(mid, record)
+                return 
+            entry["last_seen"] = now                 
 
     def _emit_progress(self, mid, record, force=False):
         now = time.monotonic()
@@ -226,6 +230,7 @@ class FileTransfers:
                                 sender.cancel(f"Peer '{first}' went offline")
                         for mid, entry in list(self._incoming.items()):
                             if entry["record"]["peer"] == first:
+                                self.receiver.cancel(mid)
                                 self._received(mid, None, f"Peer '{first}' went offline")
                 now = time.monotonic()
                 for mid, sender in list(self.senders.items()):
@@ -273,6 +278,7 @@ class FileTransfers:
                     self._emit(self._record(mid, "send", to, path.name,
                                             status="failed", error="Client disconnected"))
             for mid in list(self._incoming):
+                self.receiver.cancel(mid)
                 self._received(mid, None, "Client disconnected")
             self._incoming.clear()
             self._last_progress.clear()
