@@ -1,11 +1,11 @@
 /**
- * Networking App - Client Dashboard Application
+ * Networking App - Enterprise Client Dashboard
  * Features:
  *  1. Login / Logout flow with gateway authentication
  *  2. Real-time push with Server-Sent Events (SSE) & automatic polling fallback
  *  3. P2P File Upload & Transfer with Base64 encoding
  *  4. Direct file download for completed incoming transfers
- *  5. Modern responsive UI with live status indicators
+ *  5. Modern Enterprise SaaS UI with SVG icons & zero emojis
  */
 
 // Chế độ mock tự động kích hoạt khi mở file trực tiếp hoặc cổng 8000
@@ -17,7 +17,7 @@ let evtSource = null;
 let pollingInterval = null;
 let currentUsername = null;
 
-// ================= UTILITIES ================= //
+// ================= UTILITIES & ICONS ================= //
 
 function escapeHtml(text) {
     if (text === null || text === undefined) return "";
@@ -33,6 +33,17 @@ function formatBytes(bytes, decimals = 1) {
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + " " + sizes[i];
 }
+
+const SVG_ICONS = {
+    info: `<svg class="status-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>`,
+    success: `<svg class="status-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>`,
+    error: `<svg class="status-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>`,
+    loading: `<svg class="status-icon icon-spinner" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="2" x2="12" y2="6"></line><line x1="12" y1="18" x2="12" y2="22"></line><line x1="4.93" y1="4.93" x2="7.76" y2="7.76"></line><line x1="16.24" y1="16.24" x2="19.07" y2="19.07"></line><line x1="2" y1="12" x2="6" y2="12"></line><line x1="18" y1="12" x2="22" y2="12"></line><line x1="4.93" y1="19.07" x2="7.76" y2="16.24"></line><line x1="16.24" y1="7.76" x2="19.07" y2="4.93"></line></svg>`,
+    file: `<svg class="cell-file-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>`,
+    incoming: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>`,
+    outgoing: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 14 12 9 7 14"></polyline><line x1="12" y1="9" x2="12" y2="21"></line></svg>`,
+    download: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>`
+};
 
 // ================= VIEW TOGGLE (LOGIN / DASHBOARD) ================= //
 
@@ -56,7 +67,7 @@ function updateSyncBadge(mode, label) {
     
     if (mode === "sse") {
         badge.className = "badge badge-success";
-        text.innerText = label || "Real-time (SSE)";
+        text.innerText = label || "Live (SSE)";
         if (statSync) statSync.innerText = "SSE (Push)";
     } else {
         badge.className = "badge badge-warning";
@@ -69,7 +80,6 @@ function updateSyncBadge(mode, label) {
 
 function startSSE() {
     if (isMockMode || typeof EventSource === "undefined") {
-        console.log("Môi trường mock / không hỗ trợ SSE -> fallback sang Polling");
         updateSyncBadge("polling", "Polling (Mock)");
         startPolling();
         return;
@@ -81,8 +91,7 @@ function startSSE() {
         evtSource = new EventSource("/api/events");
 
         evtSource.onopen = () => {
-            console.log("SSE đã kết nối thành công");
-            updateSyncBadge("sse", "Real-time (SSE)");
+            updateSyncBadge("sse", "Live (SSE)");
             stopPolling();
         };
 
@@ -103,13 +112,13 @@ function startSSE() {
         };
 
         evtSource.onerror = (err) => {
-            console.warn("SSE bị ngắt kết nối hoặc lỗi, chuyển sang polling fallback:", err);
-            updateSyncBadge("polling", "Polling Fallback (1.5s)");
+            console.warn("SSE ngắt kết nối, kích hoạt polling dự phòng:", err);
+            updateSyncBadge("polling", "Polling (1.5s)");
             startPolling();
         };
     } catch (err) {
         console.error("Không thể khởi tạo EventSource:", err);
-        updateSyncBadge("polling", "Polling Fallback (1.5s)");
+        updateSyncBadge("polling", "Polling (1.5s)");
         startPolling();
     }
 }
@@ -242,7 +251,7 @@ function renderUI(state) {
             // Bấm vào tên user để tự động chọn người nhận chat/file
             if (!isMe) {
                 li.style.cursor = "pointer";
-                li.title = `Nhấn để gửi tin nhắn hoặc file cho ${u}`;
+                li.title = `Gửi tin nhắn hoặc file cho ${u}`;
                 li.addEventListener("click", () => {
                     chatToSelect.value = u;
                     fileToSelect.value = u;
@@ -272,7 +281,6 @@ function renderUI(state) {
     if ([...fileToSelect.options].some(o => o.value === currentFileSelected)) {
         fileToSelect.value = currentFileSelected;
     } else if (fileToSelect.options.length > 1 && !currentFileSelected) {
-        // Chọn mặc định peer đầu tiên nếu chưa chọn
         fileToSelect.selectedIndex = 1;
     }
 
@@ -283,7 +291,7 @@ function renderUI(state) {
 
     chatBox.innerHTML = "";
     if (messages.length === 0) {
-        chatBox.innerHTML = '<div class="chat-empty">Chưa có tin nhắn nào. Hãy bắt đầu trò chuyện!</div>';
+        chatBox.innerHTML = '<div class="chat-empty">Chưa có tin nhắn nào trong phiên này.</div>';
     } else {
         messages.forEach(msg => {
             const div = document.createElement("div");
@@ -294,7 +302,7 @@ function renderUI(state) {
             const isBroadcast = msg.to === "*";
             const toBadge = isBroadcast 
                 ? '<span class="msg-to-badge msg-to-broadcast">Broadcast</span>' 
-                : `<span class="msg-to-badge">đến ${escapeHtml(msg.to)}</span>`;
+                : `<span class="msg-to-badge">gửi ${escapeHtml(msg.to)}</span>`;
 
             div.innerHTML = `
                 <div class="message-header">
@@ -341,10 +349,10 @@ function renderUI(state) {
             else if (isFailed) statusBadgeClass = "badge-status-failed";
             else if (isTransferring) statusBadgeClass = "badge-status-transferring";
 
-            // Direction Badge
+            // Direction Badge với SVG thanh mảnh
             const dirBadge = isIncoming
-                ? `<span class="badge-direction badge-incoming">📥 Nhận</span>`
-                : `<span class="badge-direction badge-outgoing">📤 Gửi</span>`;
+                ? `<span class="badge-direction badge-incoming">${SVG_ICONS.incoming} Nhận</span>`
+                : `<span class="badge-direction badge-outgoing">${SVG_ICONS.outgoing} Gửi</span>`;
 
             // Nút Tải file cho tệp nhận đã hoàn tất
             let actionHtml = `<span class="text-muted">-</span>`;
@@ -352,7 +360,8 @@ function renderUI(state) {
                 const downloadUrl = `/api/file/download?filename=${encodeURIComponent(t.filename)}`;
                 actionHtml = `
                     <a href="${downloadUrl}" class="btn-download" download="${escapeHtml(t.filename)}" title="Tải tệp tin về máy">
-                        ⬇️ Tải về
+                        ${SVG_ICONS.download}
+                        <span>Tải về</span>
                     </a>
                 `;
             }
@@ -361,10 +370,11 @@ function renderUI(state) {
             const sizeStr = t.size ? ` (${formatBytes(t.bytes_transferred || 0)} / ${formatBytes(t.size)})` : "";
 
             tr.innerHTML = `
-                <td><strong>${escapeHtml(t.peer)}</strong></td>
+                <td><strong class="peer-name">${escapeHtml(t.peer)}</strong></td>
                 <td>
                     <div class="file-name-cell" title="${escapeHtml(t.filename)}">
-                        📄 ${escapeHtml(t.filename)}
+                        ${SVG_ICONS.file}
+                        <span class="file-cell-text">${escapeHtml(t.filename)}</span>
                         <small class="text-muted">${sizeStr}</small>
                     </div>
                 </td>
@@ -452,7 +462,6 @@ document.getElementById("login-form").addEventListener("submit", async (event) =
         loginBtn.classList.remove("loading");
         passwordInput.value = "";
 
-        // Khi đăng nhập thành công: render dashboard và kết nối SSE
         await fetchState();
         startSSE();
     } catch (err) {
@@ -531,13 +540,10 @@ function resetFileSelection() {
 }
 
 function showFileStatus(msg, type = "info") {
-    fileStatusBox.style.display = "block";
+    fileStatusBox.style.display = "flex";
     fileStatusBox.className = `file-status-box status-${type}`;
-    let icon = "ℹ️";
-    if (type === "success") icon = "✅";
-    if (type === "error") icon = "❌";
-    if (type === "loading") icon = "⏳";
-    fileStatusBox.innerHTML = `<span>${icon} ${escapeHtml(msg)}</span>`;
+    const iconSvg = SVG_ICONS[type] || SVG_ICONS.info;
+    fileStatusBox.innerHTML = `${iconSvg} <span>${escapeHtml(msg)}</span>`;
 }
 
 function hideFileStatus() {
@@ -596,7 +602,7 @@ document.getElementById("file-upload-form").addEventListener("submit", (event) =
 
             if (isMockMode) {
                 setTimeout(() => {
-                    showFileStatus(`[Mock Mode] Gửi file "${file.name}" (${formatBytes(file.size)}) tới ${toUser} thành công!`, "success");
+                    showFileStatus(`Gửi file "${file.name}" (${formatBytes(file.size)}) thành công!`, "success");
                     resetFileSelection();
                 }, 700);
                 return;
@@ -626,7 +632,7 @@ document.getElementById("file-upload-form").addEventListener("submit", (event) =
     };
 
     reader.onerror = () => {
-        showFileStatus("Không thể đọc tệp tin từ hệ thống cục bộ!", "error");
+        showFileStatus("Không thể đọc tệp tin từ thiết bị!", "error");
     };
 
     reader.readAsDataURL(file);
@@ -636,9 +642,8 @@ document.getElementById("file-upload-form").addEventListener("submit", (event) =
 
 async function initApp() {
     await fetchState();
-    // Bắt đầu lắng nghe SSE ngay khi vào ứng dụng
     startSSE();
 }
 
-// Chạy khởi tạo ứng dụng
+// Khởi chạy
 initApp();
